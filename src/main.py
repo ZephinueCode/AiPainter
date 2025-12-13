@@ -2,15 +2,15 @@
 
 import sys
 import os
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QDockWidget, QFileDialog, 
-                             QMessageBox, QToolBar, QLabel, QSpinBox, QWidget, QPushButton)
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QDockWidget, QFileDialog, QMessageBox)
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtGui import QAction, QPalette, QColor
 
 from src.core.brush_manager import BrushManager
 from src.gui.canvas import CanvasWidget
 from src.gui.panels import LeftSidebar, LayerPanel, PropertyPanel
 from src.gui.dialogs import SettingsDialog, CanvasSizeDialog
+from src.agent.agent_manager import AIAgentManager # Initialize AI manager early
 
 # High DPI Scaling
 if hasattr(Qt.ApplicationAttribute, 'AA_EnableHighDpiScaling'):
@@ -23,6 +23,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("GL Paint Pro")
         self.resize(1600, 900)
+        
+        # Init Manager
+        self.agent_manager = AIAgentManager()
         
         # Set default UI scale to 1.5
         self.ui_scale = 1.5
@@ -61,6 +64,19 @@ class MainWindow(QMainWindow):
         
         self.act_settings = QAction("Settings...", self)
         self.act_settings.triggered.connect(self.on_settings)
+        
+        # Edit Actions
+        self.act_hsl = QAction("HSL Adjustment...", self)
+        self.act_hsl.triggered.connect(lambda: self.canvas.gl_canvas.open_adjustment("HSL"))
+        
+        self.act_contrast = QAction("Contrast...", self)
+        self.act_contrast.triggered.connect(lambda: self.canvas.gl_canvas.open_adjustment("Contrast"))
+        
+        self.act_exposure = QAction("Exposure...", self)
+        self.act_exposure.triggered.connect(lambda: self.canvas.gl_canvas.open_adjustment("Exposure"))
+        
+        self.act_blur = QAction("Gaussian Blur...", self)
+        self.act_blur.triggered.connect(lambda: self.canvas.gl_canvas.open_adjustment("Blur"))
 
     def create_menubar(self):
         bar = self.menuBar()
@@ -72,9 +88,14 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.act_import)
         file_menu.addAction(self.act_export_flat)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_settings)
         
         edit_menu = bar.addMenu("&Edit")
-        edit_menu.addAction(self.act_settings)
+        edit_menu.addAction(self.act_hsl)
+        edit_menu.addAction(self.act_contrast)
+        edit_menu.addAction(self.act_exposure)
+        edit_menu.addAction(self.act_blur)
 
     def create_docks(self):
         self.dock_left = QDockWidget("Tools", self)
@@ -151,8 +172,103 @@ class MainWindow(QMainWindow):
                 self.apply_ui_scale()
                 self.statusBar().showMessage(f"Settings applied. Scale: {self.ui_scale}x")
 
+def set_light_theme(app):
+    # Force light theme palette
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(240, 240, 240))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(0, 0, 0))
+    palette.setColor(QPalette.ColorRole.Base, QColor(255, 255, 255))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(245, 245, 245))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 220))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(0, 0, 0))
+    palette.setColor(QPalette.ColorRole.Text, QColor(0, 0, 0))
+    palette.setColor(QPalette.ColorRole.Button, QColor(240, 240, 240))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(0, 0, 0))
+    palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 0, 0))
+    palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+    app.setPalette(palette)
+    
+    # Additionally set stylesheet to ensure widgets conform
+    app.setStyleSheet("""
+        QMainWindow, QDialog, QDockWidget {
+            background-color: #f0f0f0;
+            color: #000000;
+        }
+        QWidget {
+            color: #000000;
+        }
+        QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox {
+            background-color: #ffffff;
+            color: #000000;
+            border: 1px solid #c0c0c0;
+            selection-background-color: #2a82da;
+            selection-color: #ffffff;
+        }
+        QListWidget, QTreeWidget, QTableWidget {
+            background-color: #ffffff;
+            color: #000000;
+            border: 1px solid #c0c0c0;
+            selection-background-color: #2a82da;
+            selection-color: #ffffff;
+        }
+        QPushButton {
+            background-color: #e0e0e0;
+            border: 1px solid #c0c0c0;
+            padding: 5px;
+            border-radius: 3px;
+        }
+        QPushButton:hover {
+            background-color: #d0d0d0;
+        }
+        QPushButton:pressed {
+            background-color: #c0c0c0;
+        }
+        QMenuBar, QMenu {
+            background-color: #f0f0f0;
+            color: #000000;
+        }
+        QMenuBar::item:selected, QMenu::item:selected {
+            background-color: #2a82da;
+            color: #ffffff;
+        }
+        QLabel {
+            color: #000000;
+        }
+        QGroupBox {
+            border: 1px solid #c0c0c0;
+            margin-top: 10px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            subcontrol-position: top left;
+            padding: 0 3px;
+        }
+        QScrollBar:vertical {
+            background: #f0f0f0;
+            width: 12px;
+        }
+        QScrollBar::handle:vertical {
+            background: #cdcdcd;
+            min-height: 20px;
+        }
+        QScrollBar:horizontal {
+            background: #f0f0f0;
+            height: 12px;
+        }
+        QScrollBar::handle:horizontal {
+            background: #cdcdcd;
+            min-width: 20px;
+        }
+    """)
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    
+    # Apply Light Theme
+    set_light_theme(app)
+    
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

@@ -2,8 +2,11 @@
 
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QSpinBox, 
                              QDialogButtonBox, QTabWidget, QWidget, QDoubleSpinBox, 
-                             QLabel, QGridLayout, QPushButton, QButtonGroup)
+                             QLabel, QGridLayout, QPushButton, QButtonGroup, QLineEdit, QMessageBox)
 from PyQt6.QtCore import Qt
+import json
+import os
+from src.agent.agent_manager import AIAgentManager
 
 class AnchorWidget(QWidget):
     def __init__(self, parent=None):
@@ -46,7 +49,9 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None, current_width=1920, current_height=1080, current_scale=1.5):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(400, 300)
+        self.resize(500, 450) # 稍微调高一点以容纳新选项
+        
+        self.agent_manager = AIAgentManager()
         
         layout = QVBoxLayout(self)
         self.tabs = QTabWidget()
@@ -82,14 +87,63 @@ class SettingsDialog(QDialog):
         
         form_ui.addRow("UI Scale (0.5 - 2.0):", self.spin_ui_scale)
         form_ui.addRow(QLabel("Note: Interface scaling may require \na restart or window resize to fully apply."))
+        self.tab_ui.setLayout(form_ui)
         
         self.tabs.addTab(self.tab_ui, "Interface")
+        
+        # --- Tab 3: AI Settings ---
+        self.tab_ai = QWidget()
+        layout_ai = QVBoxLayout(self.tab_ai)
+        form_ai = QFormLayout()
+        
+        self.txt_base_url = QLineEdit(self.agent_manager.base_url)
+        self.txt_api_key = QLineEdit(self.agent_manager.api_key)
+        self.txt_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.txt_model = QLineEdit(self.agent_manager.model)
+        self.txt_proxy = QLineEdit(self.agent_manager.proxy)
+        self.txt_proxy.setPlaceholderText("e.g. http://127.0.0.1:7890")
+        
+        form_ai.addRow("Base URL:", self.txt_base_url)
+        form_ai.addRow("API Key:", self.txt_api_key)
+        form_ai.addRow("Model:", self.txt_model)
+        form_ai.addRow("Proxy (Optional):", self.txt_proxy)
+        layout_ai.addLayout(form_ai)
+        
+        btn_test = QPushButton("Test Connection")
+        btn_test.clicked.connect(self.test_ai_connection)
+        layout_ai.addWidget(btn_test)
+        layout_ai.addStretch()
+        
+        self.tabs.addTab(self.tab_ai, "AI Settings")
 
         # Buttons
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
+
+    def test_ai_connection(self):
+        # Update manager temp with current UI values for testing
+        self.agent_manager.base_url = self.txt_base_url.text()
+        self.agent_manager.api_key = self.txt_api_key.text()
+        self.agent_manager.proxy = self.txt_proxy.text() # 更新代理
+        self.agent_manager._init_client()
+        
+        success, msg = self.agent_manager.test_connection()
+        if success:
+            QMessageBox.information(self, "AI Connection", msg)
+        else:
+            QMessageBox.warning(self, "AI Connection Failed", msg)
+
+    def accept(self):
+        # Save AI settings on OK
+        self.agent_manager.save_config(
+            self.txt_base_url.text(),
+            self.txt_api_key.text(),
+            self.txt_model.text(),
+            self.txt_proxy.text()
+        )
+        super().accept()
 
     def get_values(self):
         return {
@@ -99,5 +153,23 @@ class SettingsDialog(QDialog):
             "ui_scale": self.spin_ui_scale.value()
         }
 
-class CanvasSizeDialog(SettingsDialog):
-    pass
+class CanvasSizeDialog(QDialog):
+    def __init__(self, parent=None, width=1920, height=1080):
+        super().__init__(parent)
+        self.setWindowTitle("New Project")
+        layout = QVBoxLayout(self)
+        
+        form = QFormLayout()
+        self.spin_w = QSpinBox(); self.spin_w.setRange(1, 16384); self.spin_w.setValue(width)
+        self.spin_h = QSpinBox(); self.spin_h.setRange(1, 16384); self.spin_h.setValue(height)
+        form.addRow("Width:", self.spin_w)
+        form.addRow("Height:", self.spin_h)
+        layout.addLayout(form)
+        
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def get_values(self):
+        return { "width": self.spin_w.value(), "height": self.spin_h.value() }
