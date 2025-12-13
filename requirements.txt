@@ -1,0 +1,6 @@
+PyQt6 
+PyOpenGL
+numpy 
+Pillow
+openai
+psd-tools

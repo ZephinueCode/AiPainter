@@ -1,0 +1,10 @@
+{
+    "name": "Thick Oil",
+    "category": "Paint",
+    "size": 40,
+    "opacity": 1.0,
+    "flow": 0.15,
+    "spacing": 0.05,
+    "hardness": 0.5,
+    "blend_mode": "Normal"
+}
