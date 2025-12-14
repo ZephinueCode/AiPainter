@@ -24,28 +24,53 @@ class BrushPanel(QWidget):
         lbl.setStyleSheet("font-weight: bold; color: #666;")
         layout.addWidget(lbl)
 
-        self.list_widget = QListWidget()
-        self.list_widget.currentItemChanged.connect(self._item_changed)
-        layout.addWidget(self.list_widget)
+        # REPLACED: QListWidget -> QTreeWidget for collapsible categories
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(15)
+        self.tree.setIconSize(QSize(24, 24)) # Size for brush tips
+        self.tree.itemClicked.connect(self._item_clicked)
+        layout.addWidget(self.tree)
+        
         self.refresh_list()
 
     def refresh_list(self):
-        self.list_widget.clear()
+        self.tree.clear()
+        
         for cat in self.brush_manager.categories:
-            if cat in self.brush_manager.brushes:
-                cat_item = QListWidgetItem(f"▼ {cat}")
-                cat_item.setBackground(QColor("#dcdcdc"))
-                cat_item.setFlags(Qt.ItemFlag.NoItemFlags)
-                self.list_widget.addItem(cat_item)
-                for brush in self.brush_manager.brushes[cat]:
-                    item = QListWidgetItem(f"   {brush.name}")
-                    item.setData(Qt.ItemDataRole.UserRole, brush)
-                    self.list_widget.addItem(item)
+            brushes = self.brush_manager.brushes.get(cat, [])
+            if not brushes:
+                continue
 
-    def _item_changed(self, current, prev):
-        if not current: return
-        brush = current.data(Qt.ItemDataRole.UserRole)
-        if isinstance(brush, BrushConfig): self.on_brush_selected(brush)
+            # Category Item
+            cat_item = QTreeWidgetItem(self.tree)
+            cat_item.setText(0, cat)
+            cat_item.setBackground(0, QColor("#dcdcdc"))
+            cat_item.setExpanded(True) # Default expanded
+            # Disable selection logic for category headers if desired, 
+            # but QTreeWidget selection is handled in click event anyway.
+
+            for brush in brushes:
+                item = QTreeWidgetItem(cat_item)
+                item.setText(0, brush.name)
+                item.setData(0, Qt.ItemDataRole.UserRole, brush)
+                
+                # Create Icon from Texture
+                if brush.texture:
+                    try:
+                        # Resize for icon
+                        thumb = brush.texture.resize((24, 24))
+                        # Convert L (Grayscale) to QImage
+                        data = thumb.tobytes("raw", "L")
+                        qimg = QImage(data, 24, 24, QImage.Format.Format_Grayscale8)
+                        item.setIcon(0, QIcon(QPixmap.fromImage(qimg)))
+                    except Exception:
+                        pass # Fail silently for icon
+
+    def _item_clicked(self, item, col):
+        brush = item.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(brush, BrushConfig):
+            self.on_brush_selected(brush)
 
 class ToolsPanel(QWidget):
     def __init__(self, on_tool_selected):
@@ -250,7 +275,7 @@ class LayerPanel(QWidget):
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDropEnabled)
                 elif isinstance(node, GroupLayer):
                     # Folder Icon
-                    item.setText(0, f"> {node.name}")
+                    item.setText(0, f"📁 {node.name}")
                     item.setExpanded(True)
                     item.setBackground(0, QColor("#eaeaea"))
                     build_tree(item, node)
@@ -374,7 +399,7 @@ class LayerPanel(QWidget):
             node.name = text
             item.setText(0, text)
             if isinstance(node, GroupLayer):
-                item.setText(0, f"> {text}")
+                item.setText(0, f"📁 {text}")
 
     def _add_layer(self):
         curr = self.tree.currentItem()

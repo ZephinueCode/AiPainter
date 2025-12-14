@@ -26,7 +26,7 @@ if hasattr(Qt.ApplicationAttribute, 'AA_UseHighDpiPixmaps'):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GL Paint Pro")
+        self.setWindowTitle("AiPainter V0.1")
         self.resize(1600, 900)
         
         self.agent_manager = AIAgentManager()

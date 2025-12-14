@@ -9,12 +9,9 @@ from PyQt6.QtGui import QPainter, QColor, QPainterPath
 from OpenGL.GL import *
 from src.core.brush_manager import BrushConfig
 from src.core.logic import Node, GroupLayer, PaintLayer, PaintCommand, UndoStack, ProjectLogic, TextLayer
-from src.core.tools import RectSelectTool, LassoTool, BucketTool, PickerTool, SmudgeTool, TextTool, AdjustmentDialog, ClipboardUtils
+from src.core.tools import RectSelectTool, LassoTool, BucketTool, PickerTool, SmudgeTool, TextTool, ClipboardUtils
 from src.core.processor import ImageProcessor
-# Added Import
-from src.gui.dialogs import GradientMapDialog
-
-# ... (GLCanvas class definition) ...
+from src.gui.dialogs import GradientMapDialog, AdjustmentDialog
 
 class GLCanvas(QOpenGLWidget):
     layer_structure_changed = pyqtSignal()
@@ -48,7 +45,6 @@ class GLCanvas(QOpenGLWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
 
-    # ... (Properties and set_tool unchanged) ...
     @property
     def brush_color(self):
         return self._brush_color
@@ -56,7 +52,7 @@ class GLCanvas(QOpenGLWidget):
     @brush_color.setter
     def brush_color(self, val):
         self._brush_color = val
-        self.brush_color_changed.emit(val)
+        self.brush_color_changed.emit(val if isinstance(val, list) else list(val))
 
     def set_tool(self, tool_name):
         if self.active_tool:
@@ -77,7 +73,6 @@ class GLCanvas(QOpenGLWidget):
         
         self.update()
 
-    # ... (InitializeGL, Resize, FillLayer, PaintGL, PaintEvent, RenderNode methods unchanged) ...
     def initializeGL(self):
         glEnable(GL_BLEND)
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
@@ -228,7 +223,6 @@ class GLCanvas(QOpenGLWidget):
             if event.button() == Qt.MouseButton.RightButton:
                 self.show_default_context_menu(event)
             elif event.button() == Qt.MouseButton.LeftButton:
-                # Check for Group Layer Painting
                 if isinstance(self.active_layer, GroupLayer):
                     QMessageBox.warning(self, "Group Selected", "Cannot paint on a Group Layer.\nPlease select a Paint Layer.")
                     return
@@ -237,7 +231,9 @@ class GLCanvas(QOpenGLWidget):
                 if self.active_layer and isinstance(self.active_layer, PaintLayer) and self.active_layer.visible and self.current_brush:
                     self.makeCurrent()
                     self._stroke_start_image = self.active_layer.get_image()
-                self._paint_stroke(pos)
+                    # Ensure texture is loaded
+                    self._update_brush_texture()
+                    self._paint_stroke(pos)
 
     def mouseMoveEvent(self, event):
         if self.is_panning:
@@ -275,12 +271,8 @@ class GLCanvas(QOpenGLWidget):
     def keyPressEvent(self, event):
         ctrl = event.modifiers() & Qt.KeyboardModifier.ControlModifier
         
-        # --- NEW: Delete Key Handling ---
         if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
-            # Check if selection exists
             if not self.selection_path.isEmpty():
-                # Perform clear (Cut without clipboard copy)
-                # To avoid overwriting clipboard, we implement a 'clear' logic here
                 if self.active_layer and isinstance(self.active_layer, PaintLayer):
                     mask = ClipboardUtils.get_selection_mask(self)
                     if mask:
@@ -293,7 +285,6 @@ class GLCanvas(QOpenGLWidget):
                         self.active_layer.load_from_image(new_img)
                         self.update()
             return
-        # --------------------------------
 
         if event.key() == Qt.Key.Key_Escape:
             if self.active_tool and hasattr(self.active_tool, 'deactivate'):
@@ -316,11 +307,9 @@ class GLCanvas(QOpenGLWidget):
             ClipboardUtils.cut(self)
         elif ctrl and event.key() == Qt.Key.Key_V:
             ClipboardUtils.paste(self)
-            
         else:
             super().keyPressEvent(event)
 
-    # ... (show_default_context_menu and other methods unchanged) ...
     def show_default_context_menu(self, event):
         menu = QMenu(self)
         clipboard = QApplication.clipboard()
@@ -333,7 +322,6 @@ class GLCanvas(QOpenGLWidget):
         menu.addAction("Contrast", lambda: self.open_adjustment("Contrast"))
         menu.addAction("Exposure", lambda: self.open_adjustment("Exposure"))
         menu.addAction("Gaussian Blur", lambda: self.open_adjustment("Blur"))
-        # Add Gradient Map to Context Menu
         menu.addAction("Gradient Map...", self.open_gradient_map)
         
         menu.exec(event.globalPosition().toPoint())
@@ -341,65 +329,50 @@ class GLCanvas(QOpenGLWidget):
     def open_adjustment(self, type):
         if not self.active_layer or not isinstance(self.active_layer, PaintLayer): return
         
+        params = []
+        func = None
+        
         if type == "HSL":
             params = [
                 {"name": "Hue", "min": -180, "max": 180, "default": 0, "scale": 1.0},
                 {"name": "Saturation (x100%)", "min": 0, "max": 200, "default": 100, "scale": 0.01},
                 {"name": "Lightness", "min": -100, "max": 100, "default": 0, "scale": 1.0}
             ]
-            dlg = AdjustmentDialog(self, "HSL", ImageProcessor.adjust_hsl, params)
-            if dlg.exec():
-                cmd = PaintCommand(self.active_layer, dlg.original_img, self.active_layer.get_image())
-                self.undo_stack.push(cmd)
-
+            func = ImageProcessor.adjust_hsl
         elif type == "Contrast":
             params = [{"name": "Factor (x100%)", "min": 0, "max": 300, "default": 100, "scale": 0.01}]
-            dlg = AdjustmentDialog(self, "Contrast", ImageProcessor.adjust_contrast, params)
-            if dlg.exec():
-                cmd = PaintCommand(self.active_layer, dlg.original_img, self.active_layer.get_image())
-                self.undo_stack.push(cmd)
-
+            func = ImageProcessor.adjust_contrast
         elif type == "Exposure":
             params = [{"name": "Factor (x100%)", "min": 0, "max": 300, "default": 100, "scale": 0.01}]
-            dlg = AdjustmentDialog(self, "Exposure", ImageProcessor.adjust_exposure, params)
-            if dlg.exec():
-                cmd = PaintCommand(self.active_layer, dlg.original_img, self.active_layer.get_image())
-                self.undo_stack.push(cmd)
-
+            func = ImageProcessor.adjust_exposure
         elif type == "Blur":
             params = [{"name": "Radius", "min": 0, "max": 50, "default": 0, "scale": 1.0}]
-            dlg = AdjustmentDialog(self, "Gaussian Blur", ImageProcessor.apply_blur, params)
+            func = ImageProcessor.apply_blur
+
+        if func:
+            dlg = AdjustmentDialog(self, type, func, params)
             if dlg.exec():
                 cmd = PaintCommand(self.active_layer, dlg.original_img, self.active_layer.get_image())
                 self.undo_stack.push(cmd)
 
     def open_gradient_map(self):
-        """Centralized method to open Gradient Map Dialog."""
-        if not self.active_layer:
-            QMessageBox.warning(self, "No Layer", "Please select a layer first.")
-            return
-
-        if not isinstance(self.active_layer, PaintLayer):
-             QMessageBox.warning(self, "Invalid Layer", "Gradient Map can only be applied to Paint Layers.")
+        if not self.active_layer or not isinstance(self.active_layer, PaintLayer):
+             QMessageBox.warning(self, "Invalid Layer", "Please select a Paint Layer.")
              return
         
         layer = self.active_layer
-        
-        # 1. Capture state before dialog (for Undo)
         self.makeCurrent()
         old_img = layer.get_image().copy()
         
-        # 2. Open Dialog
         dlg = GradientMapDialog(self)
         if dlg.exec():
-            # Dialog accepted, layer is modified by dialog preview
             self.makeCurrent()
             new_img = layer.get_image().copy()
             cmd = PaintCommand(layer, old_img, new_img)
             self.undo_stack.push(cmd)
             self.update()
         else:
-            # Dialog handles revert internally usually, but strictly we could enforce it here
+            # Revert logic handled by dialog reject, but ensure update
             pass
 
     def load_project(self, path):
@@ -440,7 +413,6 @@ class GLCanvas(QOpenGLWidget):
         glViewport(0, 0, self.doc_width, self.doc_height); glClearColor(0,0,0,0); glClear(GL_COLOR_BUFFER_BIT)
         glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, self.doc_width, self.doc_height, 0, -1, 1)
         glMatrixMode(GL_MODELVIEW); glLoadIdentity()
-        # Export needs same blend func
         glEnable(GL_TEXTURE_2D); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
         self._render_node(self.root)
         data = glReadPixels(0, 0, self.doc_width, self.doc_height, GL_RGBA, GL_UNSIGNED_BYTE)
@@ -457,16 +429,35 @@ class GLCanvas(QOpenGLWidget):
 
     def _update_brush_texture(self):
         if not self.current_brush: return
-        size = 128; img = np.zeros((size, size, 4), dtype=np.uint8)
-        center = size/2; y, x = np.ogrid[:size, :size]; dist = np.sqrt((x-center)**2 + (y-center)**2)
-        norm_dist = dist / (size/2); alpha = np.clip((1.0 - norm_dist) / (1.0 - self.current_brush.hardness + 0.001), 0, 1)
-        val = (alpha * 255).astype(np.uint8)
-        img[..., 0] = val; img[..., 1] = val; img[..., 2] = val; img[..., 3] = val
+        
         self.makeCurrent()
         if self.brush_texture_id: glDeleteTextures([self.brush_texture_id])
         self.brush_texture_id = glGenTextures(1)
         glBindTexture(GL_TEXTURE_2D, self.brush_texture_id)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, img)
+        
+        if self.current_brush.texture:
+            gray_img = self.current_brush.texture
+            if gray_img.mode != 'L':
+                gray_img = gray_img.convert('L')
+            
+            # Create white RGB image
+            white = Image.new("RGB", gray_img.size, (255, 255, 255))
+            # Put grayscale as alpha
+            rgba_img = white.copy()
+            rgba_img.putalpha(gray_img)
+            
+            width, height = rgba_img.size
+            data = rgba_img.transpose(Image.FLIP_TOP_BOTTOM).tobytes("raw", "RGBA")
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data)
+            
+        else:
+            size = 128; img = np.zeros((size, size, 4), dtype=np.uint8)
+            center = size/2; y, x = np.ogrid[:size, :size]; dist = np.sqrt((x-center)**2 + (y-center)**2)
+            norm_dist = dist / (size/2); alpha = np.clip((1.0 - norm_dist) / (1.0 - self.current_brush.hardness + 0.001), 0, 1)
+            val = (alpha * 255).astype(np.uint8)
+            img[..., 0] = 255; img[..., 1] = 255; img[..., 2] = 255; img[..., 3] = val
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, size, size, 0, GL_RGBA, GL_UNSIGNED_BYTE, img)
+            
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
 
     def _paint_stroke(self, current_pos):
@@ -474,22 +465,50 @@ class GLCanvas(QOpenGLWidget):
         if not self.active_layer.visible or not self.current_brush: return
         if not self.last_pos: self.last_pos = current_pos
         self.makeCurrent(); glBindFramebuffer(GL_FRAMEBUFFER, self.active_layer.fbo); glViewport(0, 0, self.active_layer.width, self.active_layer.height)
-        glEnable(GL_BLEND); glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, self.active_layer.width, self.active_layer.height, 0, -1, 1)
+        glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, self.active_layer.width, self.active_layer.height, 0, -1, 1)
         glMatrixMode(GL_MODELVIEW); glLoadIdentity()
-        if self.current_brush.blend_mode == "Eraser": glBlendEquation(GL_FUNC_ADD); glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA)
-        else: glBlendEquation(GL_FUNC_ADD); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+        
+        glEnable(GL_BLEND)
+        glBlendEquation(GL_FUNC_ADD)
+        
+        if self.current_brush.blend_mode == "Eraser": 
+            glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA)
+            glColor4f(0, 0, 0, self.current_brush.opacity)
+        else: 
+            # Fix: Use Separate Blending for correct alpha accumulation
+            # RGB: Standard Source Over (Premultiplied output from glColor)
+            # Alpha: Standard accumulation (Src + Dst*(1-Src))
+            glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+            
+            alpha = self.current_brush.flow * self.current_brush.opacity
+            
+            # === Robust Color Parsing ===
+            r, g, b = 0.0, 0.0, 0.0
+            
+            c = self.brush_color
+            if isinstance(c, QColor):
+                r, g, b = c.redF(), c.greenF(), c.blueF()
+            elif isinstance(c, (list, tuple)) and len(c) >= 3:
+                r, g, b = c[0], c[1], c[2]
+                # Heuristic: If any component > 1.0, assume 0-255 range and normalize
+                if r > 1.0 or g > 1.0 or b > 1.0:
+                    r /= 255.0
+                    g /= 255.0
+                    b /= 255.0
+            
+            # Standard OpenGL Color
+            glColor4f(r, g, b, alpha)
+
         dist = np.sqrt((current_pos.x() - self.last_pos.x())**2 + (current_pos.y() - self.last_pos.y())**2)
         step = max(1.0, self.current_brush.size * self.current_brush.spacing)
         steps = int(dist / step) + 1; dx = (current_pos.x() - self.last_pos.x()) / steps; dy = (current_pos.y() - self.last_pos.y()) / steps
         glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, self.brush_texture_id)
-        alpha = self.current_brush.flow * self.current_brush.opacity
-        r = self.brush_color[0] * alpha; g = self.brush_color[1] * alpha; b = self.brush_color[2] * alpha
-        glColor4f(r, g, b, alpha)
+        
         glBegin(GL_QUADS)
         for i in range(steps):
             cx = self.last_pos.x() + dx * i; cy = self.last_pos.y() + dy * i; hs = self.current_brush.size / 2
             glTexCoord2f(0,0); glVertex2f(cx-hs, cy-hs); glTexCoord2f(0,1); glVertex2f(cx-hs, cy+hs); glTexCoord2f(1,1); glVertex2f(cx+hs, cy+hs); glTexCoord2f(1,0); glVertex2f(cx+hs, cy-hs)
-        glEnd(); glBlendEquation(GL_FUNC_ADD); glBindFramebuffer(GL_FRAMEBUFFER, 0); self.update()
+        glEnd(); glBindFramebuffer(GL_FRAMEBUFFER, 0); self.update()
 
     def wheelEvent(self, event):
         delta = event.angleDelta().y()
@@ -550,11 +569,7 @@ class CanvasWidget(QWidget):
     def resize_canvas_smart(self, w, h, anchor): self.gl_canvas.resize_canvas_smart(w, h, anchor)
     def load_project(self, path): self.gl_canvas.load_project(path)
     def set_tool(self, name): self.gl_canvas.set_tool(name)
-
-    # Added helper to expose makeCurrent to panels
-    def make_current(self):
-        self.gl_canvas.makeCurrent()
-
+    def make_current(self): self.gl_canvas.makeCurrent()
     def update_scrollbars(self):
         self.h_bar.blockSignals(True); self.v_bar.blockSignals(True)
         vw = self.gl_canvas.width(); vh = self.gl_canvas.height()
@@ -564,7 +579,6 @@ class CanvasWidget(QWidget):
         if ch > vh: self.v_bar.setRange(0, int(ch - vh)); self.v_bar.setPageStep(vh); self.v_bar.setValue(int(-self.gl_canvas.offset.y())); self.v_bar.show()
         else: self.v_bar.hide()
         self.h_bar.blockSignals(False); self.v_bar.blockSignals(False)
-    
     def on_scroll(self):
         if not self.h_bar.isHidden(): self.gl_canvas.offset.setX(float(-self.h_bar.value()))
         if not self.v_bar.isHidden(): self.gl_canvas.offset.setY(float(-self.v_bar.value()))

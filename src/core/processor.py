@@ -88,7 +88,9 @@ class ImageProcessor:
         
         # Ensure start and end
         if stops[0][0] > 0.0: stops.insert(0, (0.0, stops[0][1]))
-        if stops[-1][0] < 1.0: stops.append(1.0, stops[-1][1])
+        
+        # FIX: append takes one argument, so we pass a tuple
+        if stops[-1][0] < 1.0: stops.append((1.0, stops[-1][1]))
         
         for i in range(len(stops) - 1):
             pos1, col1 = stops[i]

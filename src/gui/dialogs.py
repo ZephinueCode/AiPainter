@@ -3,7 +3,7 @@
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QSpinBox, 
                              QDialogButtonBox, QTabWidget, QWidget, QDoubleSpinBox, 
                              QLabel, QGridLayout, QPushButton, QButtonGroup, 
-                             QLineEdit, QMessageBox, QTextEdit, QHBoxLayout, QApplication)
+                             QLineEdit, QMessageBox, QTextEdit, QHBoxLayout, QApplication, QSlider)
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QPixmap, QImage
 import json
@@ -11,6 +11,62 @@ import os
 from src.agent.agent_manager import AIAgentManager
 from src.gui.widgets import GradientSlider, ColorPickerWidget
 from src.core.processor import ImageProcessor
+
+# === Adjustment Dialog (HSL, Contrast, etc.) ===
+class AdjustmentDialog(QDialog):
+    def __init__(self, parent, title, func, params):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(300, 150 + len(params) * 30)
+        
+        self.func = func
+        self.params = params
+        self.inputs = []
+        
+        # Capture original state for preview/cancel
+        self.preview_layer = parent.active_layer
+        self.original_img = self.preview_layer.get_image().copy()
+        
+        layout = QVBoxLayout(self)
+        
+        for p in params:
+            row = QHBoxLayout()
+            row.addWidget(QLabel(p['name']))
+            
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(p['min'], p['max'])
+            slider.setValue(p['default'])
+            slider.valueChanged.connect(self.on_change)
+            
+            row.addWidget(slider)
+            layout.addLayout(row)
+            
+            self.inputs.append({"widget": slider, "scale": p['scale']})
+            
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def on_change(self):
+        # Collect args from sliders
+        args = []
+        for item in self.inputs:
+            args.append(item["widget"].value() * item["scale"])
+            
+        # Apply processor function
+        # func(image, arg1, arg2, ...)
+        new_img = self.func(self.original_img, *args)
+        
+        # Update Canvas
+        self.preview_layer.load_from_image(new_img)
+        self.parent().update()
+
+    def reject(self):
+        # Revert changes
+        self.preview_layer.load_from_image(self.original_img)
+        self.parent().update()
+        super().reject()
 
 # === Gradient Map Dialog ===
 class GradientMapDialog(QDialog):
