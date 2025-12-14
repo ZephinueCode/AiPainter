@@ -374,7 +374,7 @@ class LayerPanel(QWidget):
             node.name = text
             item.setText(0, text)
             if isinstance(node, GroupLayer):
-                item.setText(0, f"📁 {text}")
+                item.setText(0, f"> {text}")
 
     def _add_layer(self):
         curr = self.tree.currentItem()
