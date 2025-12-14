@@ -1,9 +1,8 @@
 # src/gui/widgets.py
 
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout)
-from PyQt6.QtCore import Qt, pyqtSignal, QPointF, QRectF
-from PyQt6.QtGui import (QPainter, QColor, QConicalGradient, QBrush, QPen, 
-                         QLinearGradient, QPainterPath, QMouseEvent)
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, QFrame, QSlider, QGridLayout)
+from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QPointF, QRectF
+from PyQt6.QtGui import (QPainter, QColor, QConicalGradient, QBrush, QPainterPath, QLinearGradient, QPen, QPixmap, QImage, QMouseEvent)
 import math
 
 class ProcreateColorPicker(QWidget):
@@ -31,7 +30,6 @@ class ProcreateColorPicker(QWidget):
         """外部设置颜色"""
         c = QColor.fromRgbF(r, g, b)
         self.hue = max(0.0, min(1.0, c.hsvHueF()))
-        # hsvHueF return -1 for grayscale, handle it
         if self.hue < 0: self.hue = 0.0
         self.sat = c.hsvSaturationF()
         self.val = c.valueF()
@@ -169,16 +167,211 @@ class ProcreateColorPicker(QWidget):
         self.colorChanged.emit([self.current_color.redF(), 
                                 self.current_color.greenF(), 
                                 self.current_color.blueF()])
+        self.update()
+
+class PaletteButton(QPushButton):
+    """Simple color block button"""
+    colorSelected = pyqtSignal(list) # [r, g, b] (float)
+    colorSaved = pyqtSignal(int) # index
+
+    def __init__(self, index, parent=None):
+        super().__init__(parent)
+        self.index = index
+        self.color = [0.8, 0.8, 0.8] # Default gray
+        self.setFixedSize(30, 30)
+        self.update_style()
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_rgb(self, rgb):
+        self.color = rgb
+        self.update_style()
+
+    def update_style(self):
+        r, g, b = [int(c*255) for c in self.color]
+        self.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgb({r}, {g}, {b});
+                border: 1px solid #888;
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{
+                border: 2px solid #fff;
+            }}
+        """)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.colorSelected.emit(self.color)
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.colorSaved.emit(self.index)
 
 class ColorPickerWidget(QWidget):
     colorChanged = pyqtSignal(list)
+
     def __init__(self):
         super().__init__()
-        l = QVBoxLayout(self)
-        self.picker = ProcreateColorPicker()
-        self.picker.colorChanged.connect(self.colorChanged)
-        l.addWidget(self.picker, 0, Qt.AlignmentFlag.AlignCenter)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(5)
+        
+        # 1. Wheel
+        self.wheel = ProcreateColorPicker()
+        self.wheel.colorChanged.connect(self.colorChanged) # Proxy signal directly
+        layout.addWidget(self.wheel, 0, Qt.AlignmentFlag.AlignCenter)
+        
+        # 2. Palette Grid (2x5) instead of sliders
+        palette_frame = QFrame()
+        p_layout = QGridLayout(palette_frame)
+        p_layout.setContentsMargins(0, 5, 0, 0)
+        p_layout.setSpacing(4)
+        
+        self.palette_buttons = []
+        for i in range(10):
+            btn = PaletteButton(i)
+            btn.colorSelected.connect(self.load_from_palette)
+            btn.colorSaved.connect(self.save_to_palette)
+            self.palette_buttons.append(btn)
+            row = 0 if i < 5 else 1
+            col = i % 5
+            p_layout.addWidget(btn, row, col)
+            
+        layout.addWidget(palette_frame)
+        self.current_rgb = [0, 0, 0] # Internal state tracking
 
     def set_color(self, rgb):
-        # rgb is list [r, g, b] 0.0-1.0
-        self.picker.set_color_rgb(rgb[0], rgb[1], rgb[2])
+        self.current_rgb = rgb
+        self.wheel.set_color_rgb(rgb[0], rgb[1], rgb[2])
+
+    def load_from_palette(self, rgb):
+        self.set_color(rgb)
+        self.colorChanged.emit(rgb)
+
+    def save_to_palette(self, index):
+        # Save current color to the button
+        self.palette_buttons[index].set_rgb(self.current_rgb)
+
+# === Generator Status Widget ===
+class GeneratorStatusWidget(QFrame):
+    copyRequested = pyqtSignal(QImage)
+    addLayerRequested = pyqtSignal(QImage)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setFrameShadow(QFrame.Shadow.Raised)
+        self.setStyleSheet("""
+            GeneratorStatusWidget {
+                background-color: #ffffff; 
+                border: 1px solid #c0c0c0; 
+                border-radius: 8px;
+            }
+            QLabel { color: #333; }
+        """)
+        self.setFixedWidth(300)
+        self.setMinimumHeight(300) # Increased min height
+        
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(10, 10, 10, 10)
+        self.layout.setSpacing(10)
+        
+        # Header
+        header_layout = QHBoxLayout()
+        self.lbl_title = QLabel("AI Generator")
+        self.lbl_title.setStyleSheet("font-weight: bold; font-size: 14px;")
+        header_layout.addWidget(self.lbl_title)
+        header_layout.addStretch()
+        
+        self.btn_close = QPushButton("×")
+        self.btn_close.setFixedSize(24, 24)
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setStyleSheet("border: none; font-weight: bold; font-size: 16px; color: #888;")
+        self.btn_close.clicked.connect(self.hide)
+        header_layout.addWidget(self.btn_close)
+        self.layout.addLayout(header_layout)
+        
+        # Preview Image
+        self.lbl_preview = QLabel()
+        self.lbl_preview.setFixedSize(230, 230)
+        self.lbl_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_preview.setStyleSheet("background: #f0f0f0; border-radius: 4px; border: 1px dashed #ddd;")
+        self.lbl_preview.setText("Generating...")
+        self.layout.addWidget(self.lbl_preview, alignment=Qt.AlignmentFlag.AlignCenter)
+        
+        # Status Text
+        self.lbl_info = QLabel("Processing...")
+        self.lbl_info.setWordWrap(True)
+        self.lbl_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_info.setStyleSheet("font-size: 11px; color: #666;")
+        self.layout.addWidget(self.lbl_info)
+        
+        # Action Buttons
+        self.btn_container = QWidget()
+        btn_layout = QHBoxLayout(self.btn_container)
+        btn_layout.setContentsMargins(0,0,0,0)
+        btn_layout.setSpacing(10)
+        
+        self.btn_copy = QPushButton("Copy")
+        self.btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_copy.setStyleSheet("""
+            QPushButton { background-color: #f0f0f0; border: 1px solid #ccc; border-radius: 4px; padding: 6px; }
+            QPushButton:hover { background-color: #e0e0e0; }
+        """)
+        self.btn_copy.clicked.connect(self._on_copy)
+        
+        self.btn_add = QPushButton("Add Layer")
+        self.btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_add.setStyleSheet("""
+            QPushButton { background-color: #f0f0f0; border: 1px solid #ccc; border-radius: 4px; padding: 6px; }
+            QPushButton:hover { background-color: #e0e0e0; }
+        """)
+        self.btn_add.clicked.connect(self._on_add)
+        
+        btn_layout.addWidget(self.btn_copy)
+        btn_layout.addWidget(self.btn_add)
+        self.layout.addWidget(self.btn_container)
+        
+        self.current_image = None
+        self.reset_state()
+
+    def start_loading(self):
+        self.show()
+        self.raise_()
+        self.lbl_title.setText("Generating...")
+        self.lbl_preview.clear()
+        self.lbl_preview.setText("Generating...")
+        self.lbl_info.setText("Please wait...")
+        self.btn_container.hide()
+        self.current_image = None
+        self.adjustSize()
+
+    def finish_loading(self, image):
+        self.current_image = image
+        self.lbl_title.setText("Result Ready")
+        self.lbl_info.setText("Generation successful.")
+        
+        pix = QPixmap.fromImage(image)
+        scaled = pix.scaled(self.lbl_preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self.lbl_preview.setPixmap(scaled)
+        
+        self.btn_container.show()
+        self.adjustSize()
+
+    def show_error(self, msg):
+        self.lbl_title.setText("Error")
+        self.lbl_preview.clear()
+        self.lbl_preview.setText("Failed")
+        self.lbl_info.setText(msg)
+        self.btn_container.hide()
+        self.adjustSize()
+
+    def reset_state(self):
+        self.hide()
+
+    def _on_copy(self):
+        if self.current_image:
+            self.copyRequested.emit(self.current_image)
+            self.hide()
+
+    def _on_add(self):
+        if self.current_image:
+            self.addLayerRequested.emit(self.current_image)
+            self.hide()

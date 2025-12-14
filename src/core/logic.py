@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from psd_tools import PSDImage
 from OpenGL.GL import *
+import sys
 
 # === 数据结构 (Model) ===
 
@@ -70,7 +71,6 @@ class PaintLayer(Node):
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
     
     def add_child(self, node):
-        # PaintLayer cannot have children
         print("Error: Cannot add child to PaintLayer")
         pass
 
@@ -108,7 +108,7 @@ class PaintLayer(Node):
         if self.fbo: glDeleteFramebuffers(1, [self.fbo])
 
 class TextLayer(PaintLayer):
-    """文字图层，继承自PaintLayer但包含文字属性"""
+    """文字图层"""
     def __init__(self, width, height, text="Text", font_size=50, color=(0,0,0,255), x=100, y=100, name="Text Layer"):
         super().__init__(width, height, name)
         self.text_content = text
@@ -122,10 +122,29 @@ class TextLayer(PaintLayer):
         # 创建透明底图
         img = Image.new("RGBA", (self.width, self.height), (0,0,0,0))
         draw = ImageDraw.Draw(img)
-        try:
-            # 尝试加载默认字体，实际应用应支持字体选择
-            font = ImageFont.truetype("arial.ttf", self.font_size)
-        except:
+        
+        # 尝试加载字体
+        font = None
+        # 常见的系统字体路径
+        possible_fonts = [
+            "arial.ttf", 
+            "Arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "C:\\Windows\\Fonts\\arial.ttf",
+            "/System/Library/Fonts/Helvetica.ttc"
+        ]
+        
+        for f in possible_fonts:
+            try:
+                font = ImageFont.truetype(f, self.font_size)
+                break
+            except:
+                continue
+                
+        if font is None:
+            # Fallback to default (size is ignored here usually)
+            print("Warning: Could not load TTF font, using default bitmap font (size adjustment won't work)")
             font = ImageFont.load_default()
         
         draw.text((self.pos_x, self.pos_y), self.text_content, font=font, fill=self.text_color)
@@ -141,150 +160,84 @@ class TextLayer(PaintLayer):
         d["pos_y"] = self.pos_y
         return d
 
-# === 撤销/重做逻辑 ===
+# ... (Rest of logic.py remains unchanged) ...
 class PaintCommand:
     def __init__(self, layer, old_img, new_img):
         self.layer = layer
         self.old_img = old_img
         self.new_img = new_img
-        
     def undo(self):
-        if self.layer:
-            self.layer.load_from_image(self.old_img)
-            
+        if self.layer: self.layer.load_from_image(self.old_img)
     def redo(self):
-        if self.layer:
-            self.layer.load_from_image(self.new_img)
+        if self.layer: self.layer.load_from_image(self.new_img)
 
 class UndoStack:
     def __init__(self, limit=30):
         self.undo_list = []
         self.redo_list = []
         self.limit = limit
-        
     def push(self, cmd):
-        self.undo_list.append(cmd)
-        self.redo_list.clear()
-        if len(self.undo_list) > self.limit:
-            self.undo_list.pop(0)
-    
+        self.undo_list.append(cmd); self.redo_list.clear()
+        if len(self.undo_list) > self.limit: self.undo_list.pop(0)
     def undo(self):
         if not self.undo_list: return False
-        cmd = self.undo_list.pop()
-        cmd.undo()
-        self.redo_list.append(cmd)
-        return True
-        
+        cmd = self.undo_list.pop(); cmd.undo(); self.redo_list.append(cmd); return True
     def redo(self):
         if not self.redo_list: return False
-        cmd = self.redo_list.pop()
-        cmd.redo()
-        self.undo_list.append(cmd)
-        return True
+        cmd = self.redo_list.pop(); cmd.redo(); self.undo_list.append(cmd); return True
 
-# === 项目管理逻辑 ===
 class ProjectLogic:
     @staticmethod
     def save_project(root_node, width, height, path):
         import tempfile
         with tempfile.TemporaryDirectory() as temp_dir:
-            project_data = {
-                "width": width,
-                "height": height,
-                "root": root_node.to_dict()
-            }
-            with open(os.path.join(temp_dir, "project.json"), "w") as f:
-                json.dump(project_data, f, indent=2)
-            
+            project_data = { "width": width, "height": height, "root": root_node.to_dict() }
+            with open(os.path.join(temp_dir, "project.json"), "w") as f: json.dump(project_data, f, indent=2)
             def save_layer_images(node):
                 if isinstance(node, PaintLayer):
                     img = node.get_image()
                     img.save(os.path.join(temp_dir, f"{node.uuid}.png"))
                 if hasattr(node, 'children'):
-                    for child in node.children:
-                        save_layer_images(child)
-            
+                    for child in node.children: save_layer_images(child)
             save_layer_images(root_node)
-            
             with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zipf:
                 for root, dirs, files in os.walk(temp_dir):
-                    for file in files:
-                        zipf.write(os.path.join(root, file), file)
+                    for file in files: zipf.write(os.path.join(root, file), file)
 
     @staticmethod
     def load_project(path):
         import tempfile
-        # 这里简化处理，实际需要更严谨的资源管理
         with tempfile.TemporaryDirectory() as temp_dir:
-            with zipfile.ZipFile(path, 'r') as zipf:
-                zipf.extractall(temp_dir)
-            
-            with open(os.path.join(temp_dir, "project.json"), "r") as f:
-                data = json.load(f)
-            
-            width = data["width"]
-            height = data["height"]
-            root = GroupLayer("Root")
-            
+            with zipfile.ZipFile(path, 'r') as zipf: zipf.extractall(temp_dir)
+            with open(os.path.join(temp_dir, "project.json"), "r") as f: data = json.load(f)
+            width = data["width"]; height = data["height"]; root = GroupLayer("Root")
             def build_tree(node_data, parent):
                 if node_data["type"] == "GroupLayer":
-                    grp = GroupLayer(node_data["name"])
-                    grp.visible = node_data["visible"]
-                    grp.opacity = node_data["opacity"]
+                    grp = GroupLayer(node_data["name"]); grp.visible = node_data["visible"]; grp.opacity = node_data["opacity"]
                     parent.add_child(grp)
-                    for child_data in node_data["children"]:
-                        build_tree(child_data, grp)
+                    for child_data in node_data["children"]: build_tree(child_data, grp)
                 elif node_data["type"] == "PaintLayer" or node_data["type"] == "TextLayer":
                     if node_data["type"] == "TextLayer":
-                        l = TextLayer(width, height, 
-                                      text=node_data.get("text_content", "Text"),
-                                      font_size=node_data.get("font_size", 50),
-                                      color=node_data.get("text_color", (0,0,0,255)),
-                                      x=node_data.get("pos_x", 0),
-                                      y=node_data.get("pos_y", 0),
-                                      name=node_data["name"])
-                    else:
-                        l = PaintLayer(width, height, node_data["name"])
-                    
-                    l.visible = node_data["visible"]
-                    l.opacity = node_data["opacity"]
-                    l.uuid = node_data.get("uuid")
-                    
+                        l = TextLayer(width, height, text=node_data.get("text_content", "Text"), font_size=node_data.get("font_size", 50), color=node_data.get("text_color", (0,0,0,255)), x=node_data.get("pos_x", 0), y=node_data.get("pos_y", 0), name=node_data["name"])
+                    else: l = PaintLayer(width, height, node_data["name"])
+                    l.visible = node_data["visible"]; l.opacity = node_data["opacity"]; l.uuid = node_data.get("uuid")
                     img_path = os.path.join(temp_dir, f"{l.uuid}.png")
-                    if os.path.exists(img_path):
-                        pil_img = Image.open(img_path)
-                        l.load_from_image(pil_img)
+                    if os.path.exists(img_path): pil_img = Image.open(img_path); l.load_from_image(pil_img)
                     parent.add_child(l)
-
-            for child_data in data["root"]["children"]:
-                build_tree(child_data, root)
-                
+            for child_data in data["root"]["children"]: build_tree(child_data, root)
             return width, height, root
 
     @staticmethod
     def import_psd(path, current_width, current_height):
-        psd = PSDImage.open(path)
-        width = psd.width
-        height = psd.height
-        root = GroupLayer("Root")
-
+        psd = PSDImage.open(path); width = psd.width; height = psd.height; root = GroupLayer("Root")
         def process_psd_layer(psd_layer, parent_node):
             if psd_layer.is_group():
-                grp = GroupLayer(psd_layer.name)
-                grp.visible = psd_layer.visible
-                grp.opacity = psd_layer.opacity / 255.0
+                grp = GroupLayer(psd_layer.name); grp.visible = psd_layer.visible; grp.opacity = psd_layer.opacity / 255.0
                 parent_node.add_child(grp)
-                for child in psd_layer:
-                    process_psd_layer(child, grp)
+                for child in psd_layer: process_psd_layer(child, grp)
             else:
                 pil_img = psd_layer.composite(viewport=(0,0, width, height))
-                l = PaintLayer(width, height, psd_layer.name)
-                l.visible = psd_layer.visible
-                l.opacity = psd_layer.opacity / 255.0
-                l.load_from_image(pil_img)
-                parent_node.add_child(l)
-
-        for layer in reversed(list(psd)):
-            process_psd_layer(layer, root)
-            
+                l = PaintLayer(width, height, psd_layer.name); l.visible = psd_layer.visible; l.opacity = psd_layer.opacity / 255.0
+                l.load_from_image(pil_img); parent_node.add_child(l)
+        for layer in reversed(list(psd)): process_psd_layer(layer, root)
         return width, height, root

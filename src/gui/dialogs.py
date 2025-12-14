@@ -2,12 +2,15 @@
 
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QSpinBox, 
                              QDialogButtonBox, QTabWidget, QWidget, QDoubleSpinBox, 
-                             QLabel, QGridLayout, QPushButton, QButtonGroup, QLineEdit, QMessageBox)
-from PyQt6.QtCore import Qt
+                             QLabel, QGridLayout, QPushButton, QButtonGroup, 
+                             QLineEdit, QMessageBox, QTextEdit, QHBoxLayout, QApplication)
+from PyQt6.QtCore import Qt, QSize, pyqtSignal
+from PyQt6.QtGui import QPixmap, QImage
 import json
 import os
 from src.agent.agent_manager import AIAgentManager
 
+# === Anchor Selection Widget (for Canvas Resize) ===
 class AnchorWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -31,6 +34,7 @@ class AnchorWidget(QWidget):
             self.layout.addWidget(btn, r, c)
             self.btn_group.addButton(btn, r * 3 + c)
             
+            # Center button checked by default
             if r == 1 and c == 1:
                 btn.setChecked(True)
 
@@ -38,6 +42,7 @@ class AnchorWidget(QWidget):
 
     def _on_click(self, id):
         r, c = divmod(id, 3)
+        # Map 0,1,2 to 0.0, 0.5, 1.0
         y = r / 2.0
         x = c / 2.0
         self.anchor_val = (x, y)
@@ -45,11 +50,12 @@ class AnchorWidget(QWidget):
     def get_anchor(self):
         return self.anchor_val
 
+# === Global Settings Dialog ===
 class SettingsDialog(QDialog):
     def __init__(self, parent=None, current_width=1920, current_height=1080, current_scale=1.5):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(500, 450) # 稍微调高一点以容纳新选项
+        self.resize(500, 450) 
         
         self.agent_manager = AIAgentManager()
         
@@ -126,7 +132,7 @@ class SettingsDialog(QDialog):
         # Update manager temp with current UI values for testing
         self.agent_manager.base_url = self.txt_base_url.text()
         self.agent_manager.api_key = self.txt_api_key.text()
-        self.agent_manager.proxy = self.txt_proxy.text() # 更新代理
+        self.agent_manager.proxy = self.txt_proxy.text()
         self.agent_manager._init_client()
         
         success, msg = self.agent_manager.test_connection()
@@ -153,6 +159,7 @@ class SettingsDialog(QDialog):
             "ui_scale": self.spin_ui_scale.value()
         }
 
+# === New Project Dialog ===
 class CanvasSizeDialog(QDialog):
     def __init__(self, parent=None, width=1920, height=1080):
         super().__init__(parent)
@@ -173,3 +180,136 @@ class CanvasSizeDialog(QDialog):
 
     def get_values(self):
         return { "width": self.spin_w.value(), "height": self.spin_h.value() }
+
+# === Custom Size Cycler Widget (Editable + Vertical Arrows) ===
+class SizeCyclerWidget(QWidget):
+    def __init__(self, label_text, parent=None):
+        super().__init__(parent)
+        # DashScope Supported Resolutions (Common ones)
+        self.options = [512, 768, 1024, 1328, 1472, 1664]
+        self.current_idx = 2 # Default 1024
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0,0,0,0)
+        layout.setSpacing(5)
+        
+        layout.addWidget(QLabel(label_text))
+        
+        # Value Input (Editable)
+        self.spin_val = QSpinBox()
+        self.spin_val.setRange(64, 4096) 
+        self.spin_val.setSingleStep(32)
+        self.spin_val.setValue(self.options[self.current_idx])
+        self.spin_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.spin_val.setFixedWidth(120) 
+        self.spin_val.setStyleSheet("""
+            QSpinBox {
+                background-color: white; 
+                border: 1px solid #ccc; 
+                border-radius: 3px; 
+                padding: 3px;
+                font-weight: bold;
+            }
+        """)
+        layout.addWidget(self.spin_val)
+        
+        # Vertical Buttons Container
+        btn_container = QWidget()
+        v_layout = QVBoxLayout(btn_container)
+        v_layout.setContentsMargins(0,0,0,0)
+        v_layout.setSpacing(0)
+        
+        layout.addWidget(btn_container)
+        layout.addStretch()
+
+    def next_val(self):
+        curr = self.spin_val.value()
+        next_opt = self.options[0]
+        for opt in self.options:
+            if opt > curr:
+                next_opt = opt
+                break
+        self.spin_val.setValue(next_opt)
+
+    def prev_val(self):
+        curr = self.spin_val.value()
+        prev_opt = self.options[-1]
+        for opt in reversed(self.options):
+            if opt < curr:
+                prev_opt = opt
+                break
+        self.spin_val.setValue(prev_opt)
+
+    def get_value(self):
+        return self.spin_val.value()
+
+# === AI Generation Dialog (Streamlined) ===
+class AIGenerateDialog(QDialog):
+    # Signals to Main Window
+    generationRequested = pyqtSignal(str, str, str) # prompt, neg, size_str
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("AI Image Generator")
+        self.resize(400, 300) 
+        
+        layout = QVBoxLayout(self)
+        
+        # Prompt
+        layout.addWidget(QLabel("Prompt:"))
+        self.txt_prompt = QTextEdit()
+        self.txt_prompt.setPlaceholderText("Describe the image you want to generate...")
+        self.txt_prompt.setMaximumHeight(80)
+        layout.addWidget(self.txt_prompt)
+        
+        # Negative Prompt
+        layout.addWidget(QLabel("Negative Prompt:"))
+        self.txt_negative = QTextEdit()
+        self.txt_negative.setPlaceholderText("Things to avoid...")
+        self.txt_negative.setMaximumHeight(60)
+        layout.addWidget(self.txt_negative)
+        
+        # Size Selection (Custom Editable Cyclers)
+        size_label = QLabel("Size Settings (WxH):")
+        size_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        layout.addWidget(size_label)
+        
+        size_layout = QHBoxLayout()
+        self.cycler_w = SizeCyclerWidget("W:")
+        self.cycler_h = SizeCyclerWidget("H:")
+        size_layout.addWidget(self.cycler_w)
+        size_layout.addWidget(self.cycler_h)
+        layout.addLayout(size_layout)
+        
+        layout.addStretch()
+        
+        # Actions
+        btn_layout = QHBoxLayout()
+        self.btn_generate = QPushButton("Start Generation")
+        self.btn_generate.setStyleSheet("font-weight: bold; padding: 8px; background-color: #e0e0e0;")
+        self.btn_generate.clicked.connect(self.on_start)
+        
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self.reject)
+        
+        btn_layout.addWidget(self.btn_generate)
+        btn_layout.addWidget(self.btn_cancel)
+        layout.addLayout(btn_layout)
+
+    def on_start(self):
+        prompt = self.txt_prompt.toPlainText().strip()
+        negative = self.txt_negative.toPlainText().strip()
+        
+        w = self.cycler_w.get_value()
+        h = self.cycler_h.get_value()
+        size_str = f"{w}*{h}"
+        
+        if not prompt:
+            QMessageBox.warning(self, "Error", "Please enter a prompt.")
+            return
+            
+        # Emit signal to main window controller
+        self.generationRequested.emit(prompt, negative, size_str)
+        
+        # Close dialog immediately
+        self.accept()

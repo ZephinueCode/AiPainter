@@ -12,6 +12,8 @@ from src.core.logic import Node, GroupLayer, PaintLayer, PaintCommand, UndoStack
 from src.core.tools import RectSelectTool, LassoTool, BucketTool, PickerTool, SmudgeTool, TextTool, AdjustmentDialog, ClipboardUtils
 from src.core.processor import ImageProcessor
 
+# ... (GLCanvas class definition) ...
+
 class GLCanvas(QOpenGLWidget):
     layer_structure_changed = pyqtSignal()
     view_changed = pyqtSignal()
@@ -44,6 +46,7 @@ class GLCanvas(QOpenGLWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
 
+    # ... (Properties and set_tool unchanged) ...
     @property
     def brush_color(self):
         return self._brush_color
@@ -72,6 +75,7 @@ class GLCanvas(QOpenGLWidget):
         
         self.update()
 
+    # ... (InitializeGL, Resize, FillLayer, PaintGL, PaintEvent, RenderNode methods unchanged) ...
     def initializeGL(self):
         glEnable(GL_BLEND)
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
@@ -222,7 +226,7 @@ class GLCanvas(QOpenGLWidget):
             if event.button() == Qt.MouseButton.RightButton:
                 self.show_default_context_menu(event)
             elif event.button() == Qt.MouseButton.LeftButton:
-                # FIX: Check BEFORE assignment to prevent stuck brush state
+                # Check for Group Layer Painting
                 if isinstance(self.active_layer, GroupLayer):
                     QMessageBox.warning(self, "Group Selected", "Cannot paint on a Group Layer.\nPlease select a Paint Layer.")
                     return
@@ -269,6 +273,31 @@ class GLCanvas(QOpenGLWidget):
     def keyPressEvent(self, event):
         ctrl = event.modifiers() & Qt.KeyboardModifier.ControlModifier
         
+        # --- NEW: Delete Key Handling ---
+        if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
+            # Check if selection exists
+            if not self.selection_path.isEmpty():
+                # Perform clear (Cut without clipboard copy)
+                # We can reuse ClipboardUtils.cut logic but that copies to clipboard.
+                # Let's implement a clear logic manually or add a method in ClipboardUtils
+                # For simplicity, we can just call cut? User said "Clear pixels". 
+                # Cut is fine, or we can do a paint command with transparent rect.
+                
+                # To avoid overwriting clipboard, we implement a 'clear' logic here
+                if self.active_layer and isinstance(self.active_layer, PaintLayer):
+                    mask = ClipboardUtils.get_selection_mask(self)
+                    if mask:
+                        old_img = self.active_layer.get_image()
+                        transparent = Image.new("RGBA", old_img.size, (0,0,0,0))
+                        new_img = Image.composite(transparent, old_img, mask)
+                        
+                        cmd = PaintCommand(self.active_layer, old_img, new_img)
+                        self.undo_stack.push(cmd)
+                        self.active_layer.load_from_image(new_img)
+                        self.update()
+            return
+        # --------------------------------
+
         if event.key() == Qt.Key.Key_Escape:
             if self.active_tool and hasattr(self.active_tool, 'deactivate'):
                 self.active_tool.deactivate()
@@ -294,6 +323,7 @@ class GLCanvas(QOpenGLWidget):
         else:
             super().keyPressEvent(event)
 
+    # ... (show_default_context_menu and other methods unchanged) ...
     def show_default_context_menu(self, event):
         menu = QMenu(self)
         clipboard = QApplication.clipboard()

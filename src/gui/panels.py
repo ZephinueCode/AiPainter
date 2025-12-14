@@ -9,6 +9,7 @@ from PyQt6.QtGui import QFont, QColor
 from src.gui.widgets import ColorPickerWidget
 from src.core.brush_manager import BrushConfig
 from src.core.logic import GroupLayer, PaintLayer
+from src.gui.dialogs import AIGenerateDialog
 
 class BrushPanel(QWidget):
     def __init__(self, brush_manager, on_brush_selected):
@@ -87,10 +88,20 @@ class AIPanel(QWidget):
         lbl.setStyleSheet("font-weight: bold; color: #666;")
         layout.addWidget(lbl)
         
-        content = QLabel("Coming Soon...\n(Reserved for AI)")
-        content.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        content.setStyleSheet("background-color: #eee; border-radius: 5px; color: #999;")
-        layout.addWidget(content, 1)
+        self.btn_generate = QPushButton("▲ Auto Generate")
+        self.btn_generate.setMinimumHeight(45)
+        self.btn_generate.setStyleSheet("""
+            QPushButton { text-align: left; padding-left: 20px; font-family: monospace; font-size: 13px; }
+            QPushButton:hover { background-color: #e0e0e0; }
+        """)
+        self.btn_generate.clicked.connect(self.open_generator)
+        
+        layout.addWidget(self.btn_generate)
+        layout.addStretch()
+
+    def open_generator(self):
+        dlg = AIGenerateDialog(self)
+        dlg.exec()
 
 class LeftSidebar(QWidget):
     def __init__(self, brush_manager, on_brush_selected, on_tool_selected):
@@ -119,26 +130,6 @@ class LeftSidebar(QWidget):
         line.setStyleSheet("background-color: #ccc;")
         layout.addWidget(line)
 
-# Custom Tree Widget to handle drop events
-class LayersTreeWidget(QTreeWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setHeaderHidden(True)
-        self.setIndentation(15)
-        self.setDragEnabled(True)
-        self.setAcceptDrops(True)
-        self.setDragDropMode(QTreeWidget.DragDropMode.InternalMove)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-
-    def dropEvent(self, event):
-        # Default implementation handles the move
-        super().dropEvent(event)
-        # Notify parent to sync logic
-        if self.parent():
-             # Find the LayerPanel instance (which is the parent widget usually)
-             # But here we can just assume usage context or use signal
-             pass
-
 class LayerPanel(QWidget):
     def __init__(self, canvas):
         super().__init__()
@@ -147,7 +138,6 @@ class LayerPanel(QWidget):
         
         layout = QVBoxLayout(self); layout.setContentsMargins(0,0,0,0)
         
-        # Use standard QTreeWidget but override dropEvent method on the instance
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setIndentation(15)
@@ -156,13 +146,18 @@ class LayerPanel(QWidget):
         self.tree.setDragDropMode(QTreeWidget.DragDropMode.InternalMove)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         
-        # Override dropEvent to trigger sync
+        # --- CRITICAL FIX: Override dropEvent to sync logic ---
         original_drop_event = self.tree.dropEvent
-        def new_drop_event(event):
-            original_drop_event(event)
-            self._sync_logical_structure()
-        self.tree.dropEvent = new_drop_event
         
+        def new_drop_event(event):
+            # 1. Perform UI Drop
+            original_drop_event(event)
+            # 2. Sync Logic
+            self._sync_logical_structure()
+            
+        self.tree.dropEvent = new_drop_event
+        # -----------------------------------------------------
+
         self.tree.itemDoubleClicked.connect(self._rename_item)
         self.tree.currentItemChanged.connect(self._on_select)
         self.tree.itemChanged.connect(self._on_data_change)
@@ -180,19 +175,17 @@ class LayerPanel(QWidget):
         layout.addLayout(btn_layout)
 
     def refresh(self):
-        # Block signals to prevent loops
         self.tree.blockSignals(True)
         self.tree.clear()
         
         def build_tree(ui_parent, node_parent):
-            # Render order is Bottom->Top, UI is Top->Bottom, so reverse for UI
+            # Reverse for UI
             for node in reversed(node_parent.children):
                 item = QTreeWidgetItem(ui_parent)
                 item.setText(0, node.name)
                 item.setData(0, Qt.ItemDataRole.UserRole, node)
                 item.setCheckState(0, Qt.CheckState.Checked if node.visible else Qt.CheckState.Unchecked)
                 
-                # Prevent dragging ONTO PaintLayers (Leaf nodes)
                 if isinstance(node, PaintLayer):
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDropEnabled)
                 
@@ -209,37 +202,25 @@ class LayerPanel(QWidget):
 
     def _sync_logical_structure(self):
         """Rebuilds the Canvas logical tree based on the current UI TreeWidget structure."""
-
         def rebuild_node(tree_item):
             logical_node = tree_item.data(0, Qt.ItemDataRole.UserRole)
-            # Important: Clear existing children to rebuild the list
-            logical_node.children = [] 
-            
-            # Tree is Top->Bottom (visual order). 
-            # Logic rendering is Bottom->Top (painter's algorithm).
-            # So the visual TOP item should be the LAST child in the logical list.
+            logical_node.children = [] # Reset logic children
             
             count = tree_item.childCount()
-            # Iterate visual children in REVERSE order
+            # Iterate Reverse (UI Top -> Logic Last)
             for i in range(count - 1, -1, -1):
                 child_item = tree_item.child(i)
                 child_node = rebuild_node(child_item)
-                # Re-establish parent-child relationship
                 logical_node.add_child(child_node)
-                
             return logical_node
 
-        # Root handling
-        # self.canvas.root is the invisible root
         self.canvas.root.children = []
         count = self.tree.topLevelItemCount()
-        
-        # Iterate visual top level items in REVERSE
         for i in range(count - 1, -1, -1):
             item = self.tree.topLevelItem(i)
             node = rebuild_node(item)
             self.canvas.root.add_child(node)
-
+            
         self.canvas.update()
 
     def _on_select(self, current, prev):
@@ -252,13 +233,10 @@ class LayerPanel(QWidget):
         if node:
             is_checked = (item.checkState(0) == Qt.CheckState.Checked)
             node.visible = is_checked
-            
-            # Recursive check update for groups
             if isinstance(node, GroupLayer):
                 self.tree.blockSignals(True)
                 self._set_node_visibility_recursive(item, is_checked)
                 self.tree.blockSignals(False)
-                
             self.canvas.update()
 
     def _set_node_visibility_recursive(self, parent_item, visible):
@@ -284,7 +262,6 @@ class LayerPanel(QWidget):
         curr = self.tree.currentItem()
         target = curr.data(0, Qt.ItemDataRole.UserRole) if curr else self.canvas.root
         
-        # Insert Logic: If PaintLayer, add to parent. If Group, add to Group.
         if isinstance(target, PaintLayer):
             parent = target.parent if target.parent else self.canvas.root
         else:
