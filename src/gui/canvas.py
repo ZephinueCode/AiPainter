@@ -11,6 +11,8 @@ from src.core.brush_manager import BrushConfig
 from src.core.logic import Node, GroupLayer, PaintLayer, PaintCommand, UndoStack, ProjectLogic, TextLayer
 from src.core.tools import RectSelectTool, LassoTool, BucketTool, PickerTool, SmudgeTool, TextTool, AdjustmentDialog, ClipboardUtils
 from src.core.processor import ImageProcessor
+# Added Import
+from src.gui.dialogs import GradientMapDialog
 
 # ... (GLCanvas class definition) ...
 
@@ -278,11 +280,6 @@ class GLCanvas(QOpenGLWidget):
             # Check if selection exists
             if not self.selection_path.isEmpty():
                 # Perform clear (Cut without clipboard copy)
-                # We can reuse ClipboardUtils.cut logic but that copies to clipboard.
-                # Let's implement a clear logic manually or add a method in ClipboardUtils
-                # For simplicity, we can just call cut? User said "Clear pixels". 
-                # Cut is fine, or we can do a paint command with transparent rect.
-                
                 # To avoid overwriting clipboard, we implement a 'clear' logic here
                 if self.active_layer and isinstance(self.active_layer, PaintLayer):
                     mask = ClipboardUtils.get_selection_mask(self)
@@ -336,6 +333,9 @@ class GLCanvas(QOpenGLWidget):
         menu.addAction("Contrast", lambda: self.open_adjustment("Contrast"))
         menu.addAction("Exposure", lambda: self.open_adjustment("Exposure"))
         menu.addAction("Gaussian Blur", lambda: self.open_adjustment("Blur"))
+        # Add Gradient Map to Context Menu
+        menu.addAction("Gradient Map...", self.open_gradient_map)
+        
         menu.exec(event.globalPosition().toPoint())
 
     def open_adjustment(self, type):
@@ -372,6 +372,35 @@ class GLCanvas(QOpenGLWidget):
             if dlg.exec():
                 cmd = PaintCommand(self.active_layer, dlg.original_img, self.active_layer.get_image())
                 self.undo_stack.push(cmd)
+
+    def open_gradient_map(self):
+        """Centralized method to open Gradient Map Dialog."""
+        if not self.active_layer:
+            QMessageBox.warning(self, "No Layer", "Please select a layer first.")
+            return
+
+        if not isinstance(self.active_layer, PaintLayer):
+             QMessageBox.warning(self, "Invalid Layer", "Gradient Map can only be applied to Paint Layers.")
+             return
+        
+        layer = self.active_layer
+        
+        # 1. Capture state before dialog (for Undo)
+        self.makeCurrent()
+        old_img = layer.get_image().copy()
+        
+        # 2. Open Dialog
+        dlg = GradientMapDialog(self)
+        if dlg.exec():
+            # Dialog accepted, layer is modified by dialog preview
+            self.makeCurrent()
+            new_img = layer.get_image().copy()
+            cmd = PaintCommand(layer, old_img, new_img)
+            self.undo_stack.push(cmd)
+            self.update()
+        else:
+            # Dialog handles revert internally usually, but strictly we could enforce it here
+            pass
 
     def load_project(self, path):
         try:
@@ -521,6 +550,10 @@ class CanvasWidget(QWidget):
     def resize_canvas_smart(self, w, h, anchor): self.gl_canvas.resize_canvas_smart(w, h, anchor)
     def load_project(self, path): self.gl_canvas.load_project(path)
     def set_tool(self, name): self.gl_canvas.set_tool(name)
+
+    # Added helper to expose makeCurrent to panels
+    def make_current(self):
+        self.gl_canvas.makeCurrent()
 
     def update_scrollbars(self):
         self.h_bar.blockSignals(True); self.v_bar.blockSignals(True)

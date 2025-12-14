@@ -1,6 +1,6 @@
 # src/core/processor.py
 
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance, ImageFilter, ImageDraw
 import colorsys
 import numpy as np
 
@@ -18,10 +18,6 @@ class ImageProcessor:
         # 拆分通道
         r, g, b, a = image.split()
         
-        # 转换为 HSV 调整
-        # 这里使用 numpy 加速可能更好，但为了保持依赖简单，使用 point 操作或遍历
-        # 实际上 python 循环太慢，我们尝试使用 PIL 的矩阵运算或简单方案
-        # 简易方案：先转 HSV
         img_hsv = image.convert('HSV')
         h, s, v = img_hsv.split()
         
@@ -73,3 +69,60 @@ class ImageProcessor:
     @staticmethod
     def flip_vertical(image):
         return image.transpose(Image.FLIP_TOP_BOTTOM)
+
+    @staticmethod
+    def apply_gradient_map(image, stops):
+        """
+        stops: list of (position, (r,g,b))
+        position: 0.0 to 1.0
+        """
+        if image.mode != 'RGBA':
+            image = image.convert('RGBA')
+        
+        # 1. Create Gradient LUT (256x1)
+        lut_img = Image.new("RGB", (256, 1))
+        draw = ImageDraw.Draw(lut_img)
+        
+        # Sort stops by position
+        stops = sorted(stops, key=lambda x: x[0])
+        
+        # Ensure start and end
+        if stops[0][0] > 0.0: stops.insert(0, (0.0, stops[0][1]))
+        if stops[-1][0] < 1.0: stops.append(1.0, stops[-1][1])
+        
+        for i in range(len(stops) - 1):
+            pos1, col1 = stops[i]
+            pos2, col2 = stops[i+1]
+            
+            x1 = int(pos1 * 255)
+            x2 = int(pos2 * 255)
+            width = x2 - x1
+            
+            if width > 0:
+                for x in range(width):
+                    ratio = x / width
+                    r = int(col1[0] * (1-ratio) + col2[0] * ratio)
+                    g = int(col1[1] * (1-ratio) + col2[1] * ratio)
+                    b = int(col1[2] * (1-ratio) + col2[2] * ratio)
+                    draw.point((x1 + x, 0), fill=(r, g, b))
+        
+        # Fill last pixel just in case
+        draw.point((255, 0), fill=stops[-1][1])
+        
+        # 2. Extract LUT arrays
+        lut_data = list(lut_img.getdata()) # list of (r,g,b)
+        r_lut = [p[0] for p in lut_data]
+        g_lut = [p[1] for p in lut_data]
+        b_lut = [p[2] for p in lut_data]
+        
+        # 3. Convert Source to Grayscale
+        gray = image.convert("L")
+        
+        # 4. Map
+        r_ch = gray.point(r_lut)
+        g_ch = gray.point(g_lut)
+        b_ch = gray.point(b_lut)
+        
+        # 5. Merge with original Alpha
+        _, _, _, a = image.split()
+        return Image.merge("RGBA", (r_ch, g_ch, b_ch, a))

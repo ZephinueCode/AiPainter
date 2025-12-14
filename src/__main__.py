@@ -1,4 +1,4 @@
-# src/main.py
+# src/__main__.py
 
 import sys
 import os
@@ -160,6 +160,10 @@ class MainWindow(QMainWindow):
         self.act_blur = QAction("Gaussian Blur...", self)
         self.act_blur.triggered.connect(lambda: self.canvas.gl_canvas.open_adjustment("Blur"))
 
+        # === Add Gradient Map Action ===
+        self.act_grad_map = QAction("Gradient Map...", self)
+        self.act_grad_map.triggered.connect(lambda: self.canvas.gl_canvas.open_gradient_map())
+
     def create_menubar(self):
         bar = self.menuBar()
         file_menu = bar.addMenu("&File")
@@ -178,6 +182,8 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.act_contrast)
         edit_menu.addAction(self.act_exposure)
         edit_menu.addAction(self.act_blur)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.act_grad_map) # Added here
 
     def create_docks(self):
         self.dock_left = QDockWidget("Tools", self)

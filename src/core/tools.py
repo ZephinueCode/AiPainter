@@ -5,7 +5,7 @@ from PyQt6.QtGui import QPainter, QPen, QColor, QPainterPath, QCursor, QFont, QI
 from PyQt6.QtWidgets import QMenu, QInputDialog, QDialog, QVBoxLayout, QSlider, QLabel, QDialogButtonBox, QApplication, QMessageBox
 from src.core.logic import PaintLayer, TextLayer, PaintCommand, GroupLayer
 from src.core.processor import ImageProcessor
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter  # Added ImageFilter
 import numpy as np
 from OpenGL.GL import glReadPixels, GL_RGB, GL_FLOAT
 import io
@@ -638,6 +638,7 @@ class SmudgeTool(Tool):
         try: src_patch = layer_img.crop(src_box)
         except: return
 
+        # Fixed: ImageFilter was missing. Now imported.
         src_patch = src_patch.filter(ImageFilter.GaussianBlur(1))
         
         mask = Image.new("L", src_patch.size, 0)

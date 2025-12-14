@@ -3,13 +3,15 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QTreeWidget, QTreeWidgetItem, QListWidget, QListWidgetItem, 
                              QGroupBox, QLabel, QSlider, QInputDialog, QFrame, QGridLayout,
-                             QAbstractItemView)
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QColor
+                             QAbstractItemView, QMenu, QMessageBox)
+from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap, QImage
 from src.gui.widgets import ColorPickerWidget
 from src.core.brush_manager import BrushConfig
-from src.core.logic import GroupLayer, PaintLayer
+from src.core.logic import GroupLayer, PaintLayer, PaintCommand
 from src.gui.dialogs import AIGenerateDialog
+from src.core.processor import ImageProcessor
+import io
 
 class BrushPanel(QWidget):
     def __init__(self, brush_manager, on_brush_selected):
@@ -136,8 +138,22 @@ class LayerPanel(QWidget):
         self.canvas = canvas
         self.canvas.layer_structure_changed.connect(self.refresh)
         
-        layout = QVBoxLayout(self); layout.setContentsMargins(0,0,0,0)
+        layout = QVBoxLayout(self); layout.setContentsMargins(5,5,5,5)
         
+        # --- Opacity Control ---
+        op_layout = QHBoxLayout()
+        op_layout.addWidget(QLabel("Opacity:"))
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(0, 100)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_change)
+        op_layout.addWidget(self.opacity_slider)
+        self.lbl_opacity_val = QLabel("100%")
+        self.lbl_opacity_val.setFixedWidth(35)
+        op_layout.addWidget(self.lbl_opacity_val)
+        layout.addLayout(op_layout)
+
+        # --- Layer Tree ---
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setIndentation(15)
@@ -145,6 +161,11 @@ class LayerPanel(QWidget):
         self.tree.setAcceptDrops(True)
         self.tree.setDragDropMode(QTreeWidget.DragDropMode.InternalMove)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.setIconSize(QSize(32, 32)) # Set icon size for thumbnails
+        
+        # Context Menu
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_context_menu)
         
         # --- CRITICAL FIX: Override dropEvent to sync logic ---
         original_drop_event = self.tree.dropEvent
@@ -174,31 +195,108 @@ class LayerPanel(QWidget):
         btn_layout.addWidget(self.btn_add); btn_layout.addWidget(self.btn_group); btn_layout.addWidget(self.btn_del)
         layout.addLayout(btn_layout)
 
+    def _update_item_thumbnail(self, item):
+        """Helper to update a single item's thumbnail."""
+        node = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(node, PaintLayer):
+            return
+
+        # Context safety
+        if hasattr(self.canvas, 'make_current'):
+            self.canvas.make_current()
+        elif hasattr(self.canvas, 'gl_canvas'):
+            self.canvas.gl_canvas.makeCurrent()
+
+        try:
+            # Get PIL Image from layer (This calls glReadPixels)
+            pil_img = node.get_image()
+            
+            # Generate thumbnail efficiently
+            pil_img.thumbnail((32, 32))
+            if pil_img.mode != "RGBA":
+                pil_img = pil_img.convert("RGBA")
+            
+            # Direct buffer access
+            data = pil_img.tobytes("raw", "RGBA")
+            qimg = QImage(data, pil_img.width, pil_img.height, QImage.Format.Format_RGBA8888).copy()
+            
+            pixmap = QPixmap.fromImage(qimg)
+            item.setIcon(0, QIcon(pixmap))
+        except Exception as e:
+            print(f"Thumbnail error: {e}")
+
     def refresh(self):
+        """Refreshes the layer tree, including generating thumbnails."""
         self.tree.blockSignals(True)
         self.tree.clear()
         
+        # Ensure context is current for reading pixels for thumbnails
+        if hasattr(self.canvas, 'make_current'):
+            self.canvas.make_current()
+        elif hasattr(self.canvas, 'gl_canvas'):
+            self.canvas.gl_canvas.makeCurrent()
+        
         def build_tree(ui_parent, node_parent):
-            # Reverse for UI
+            # Reverse for UI (Top layer in logic should be top in UI)
             for node in reversed(node_parent.children):
                 item = QTreeWidgetItem(ui_parent)
                 item.setText(0, node.name)
                 item.setData(0, Qt.ItemDataRole.UserRole, node)
                 item.setCheckState(0, Qt.CheckState.Checked if node.visible else Qt.CheckState.Unchecked)
                 
+                # --- Thumbnail Generation ---
                 if isinstance(node, PaintLayer):
+                    self._update_item_thumbnail(item)
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDropEnabled)
-                
-                if isinstance(node, GroupLayer):
+                elif isinstance(node, GroupLayer):
+                    # Folder Icon
+                    item.setText(0, f"📁 {node.name}")
                     item.setExpanded(True)
                     item.setBackground(0, QColor("#eaeaea"))
                     build_tree(item, node)
+                # -----------------------------
                 
                 if node == self.canvas.active_layer:
                     self.tree.setCurrentItem(item)
+                    # Sync Opacity Slider
+                    self.opacity_slider.blockSignals(True)
+                    self.opacity_slider.setValue(int(node.opacity * 100))
+                    self.lbl_opacity_val.setText(f"{int(node.opacity * 100)}%")
+                    self.opacity_slider.blockSignals(False)
 
         build_tree(self.tree, self.canvas.root)
         self.tree.blockSignals(False)
+
+    def _show_context_menu(self, position):
+        item = self.tree.itemAt(position)
+        if not item: return
+        
+        node = item.data(0, Qt.ItemDataRole.UserRole)
+        menu = QMenu()
+        
+        # Add actions based on layer type
+        if isinstance(node, PaintLayer):
+            action_gradient = menu.addAction("Gradient Map...")
+            action_gradient.triggered.connect(lambda: self._open_gradient_map(node))
+            
+        menu.exec(self.tree.viewport().mapToGlobal(position))
+
+    def _open_gradient_map(self, layer):
+        # Set active layer if needed
+        if self.canvas.active_layer != layer:
+            self.canvas.active_layer = layer
+            
+        # Delegate to Central Canvas Logic
+        if hasattr(self.canvas, 'gl_canvas'):
+            self.canvas.gl_canvas.open_gradient_map()
+
+    def _on_opacity_change(self, value):
+        opacity = value / 100.0
+        self.lbl_opacity_val.setText(f"{value}%")
+        
+        if self.canvas.active_layer:
+            self.canvas.active_layer.opacity = opacity
+            self.canvas.update()
 
     def _sync_logical_structure(self):
         """Rebuilds the Canvas logical tree based on the current UI TreeWidget structure."""
@@ -227,6 +325,24 @@ class LayerPanel(QWidget):
         if not current: return
         node = current.data(0, Qt.ItemDataRole.UserRole)
         self.canvas.active_layer = node
+        
+        # --- Update Thumbnails on Selection Change ---
+        # Update previous (it might have changed since we left it)
+        if prev:
+            prev_node = prev.data(0, Qt.ItemDataRole.UserRole)
+            if isinstance(prev_node, PaintLayer):
+                self._update_item_thumbnail(prev)
+        
+        # Update current (ensure it's fresh)
+        if isinstance(node, PaintLayer):
+            self._update_item_thumbnail(current)
+        # ---------------------------------------------
+        
+        # Sync Opacity Slider
+        self.opacity_slider.blockSignals(True)
+        self.opacity_slider.setValue(int(node.opacity * 100))
+        self.lbl_opacity_val.setText(f"{int(node.opacity * 100)}%")
+        self.opacity_slider.blockSignals(False)
 
     def _on_data_change(self, item, col):
         node = item.data(0, Qt.ItemDataRole.UserRole)
@@ -257,6 +373,8 @@ class LayerPanel(QWidget):
         if ok and text:
             node.name = text
             item.setText(0, text)
+            if isinstance(node, GroupLayer):
+                item.setText(0, f"📁 {text}")
 
     def _add_layer(self):
         curr = self.tree.currentItem()
@@ -316,4 +434,21 @@ class PropertyPanel(QWidget):
         l_brush.addLayout(mk_sl("Opacity", 0, 100, 100, lambda v: setattr(self.canvas.current_brush, 'opacity', v/100) if self.canvas.current_brush else None))
         l_brush.addLayout(mk_sl("Flow", 0, 100, 100, lambda v: setattr(self.canvas.current_brush, 'flow', v/100) if self.canvas.current_brush else None))
         layout.addWidget(group_brush)
+        
+        # --- Adjustments Group ---
+        group_adj = QGroupBox("Adjustments")
+        l_adj = QVBoxLayout(group_adj)
+        
+        self.btn_grad_map = QPushButton("Gradient Map")
+        self.btn_grad_map.clicked.connect(self._open_gradient_map)
+        l_adj.addWidget(self.btn_grad_map)
+        
+        layout.addWidget(group_adj)
+        # -------------------------
+        
         layout.addStretch()
+
+    def _open_gradient_map(self):
+        # Delegate to Central Canvas Logic
+        if hasattr(self.canvas, 'gl_canvas'):
+            self.canvas.gl_canvas.open_gradient_map()

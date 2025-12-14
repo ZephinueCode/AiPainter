@@ -249,6 +249,169 @@ class ColorPickerWidget(QWidget):
         # Save current color to the button
         self.palette_buttons[index].set_rgb(self.current_rgb)
 
+class GradientSlider(QWidget):
+    gradientChanged = pyqtSignal(list) # List of (pos, (r,g,b))
+    stopSelected = pyqtSignal(list) # current color of selected stop
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(60)
+        self.setMouseTracking(True)
+        # List of [pos (0-1), [r,g,b] (0-255)]
+        self.stops = [
+            [0.0, [0, 0, 0]],
+            [1.0, [255, 255, 255]]
+        ]
+        self.selected_index = -1
+        self.dragging_index = -1
+        self.hover_index = -1
+        
+        self.margin_x = 10
+        self.bar_height = 20
+        self.handle_size = 12
+
+    def set_current_stop_color(self, rgb_0_1):
+        if self.selected_index != -1:
+            self.stops[self.selected_index][1] = [int(c*255) for c in rgb_0_1]
+            self.update()
+            self.gradientChanged.emit(self.stops)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        w, h = self.width(), self.height()
+        bar_y = (h - self.bar_height) / 2
+        bar_rect = QRectF(self.margin_x, bar_y, w - 2*self.margin_x, self.bar_height)
+        
+        # Draw Gradient Bar
+        grad = QLinearGradient(bar_rect.left(), 0, bar_rect.right(), 0)
+        sorted_stops = sorted(self.stops, key=lambda x: x[0])
+        for pos, col in sorted_stops:
+            grad.setColorAt(pos, QColor(col[0], col[1], col[2]))
+            
+        painter.setBrush(grad)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(bar_rect, 4, 4)
+        
+        # Draw Handles
+        for i, (pos, col) in enumerate(self.stops):
+            cx = self.margin_x + pos * bar_rect.width()
+            cy = bar_y + self.bar_height + 8
+            
+            # Triangle shape
+            path = QPainterPath()
+            path.moveTo(cx, bar_y + self.bar_height)
+            path.lineTo(cx - 6, cy + 6)
+            path.lineTo(cx + 6, cy + 6)
+            path.closeSubpath()
+            
+            # Color indicator box
+            indicator_rect = QRectF(cx - 5, cy + 8, 10, 10)
+            
+            # Selection Highlight
+            if i == self.selected_index:
+                painter.setPen(QPen(Qt.GlobalColor.blue, 2))
+            elif i == self.hover_index:
+                painter.setPen(QPen(Qt.GlobalColor.gray, 2))
+            else:
+                painter.setPen(QPen(Qt.GlobalColor.black, 1))
+            
+            painter.setBrush(Qt.GlobalColor.white)
+            painter.drawPath(path)
+            
+            painter.setBrush(QColor(col[0], col[1], col[2]))
+            painter.drawRect(indicator_rect)
+
+    def mousePressEvent(self, event):
+        pos = event.position()
+        w = self.width() - 2*self.margin_x
+        bar_rect = QRectF(self.margin_x, (self.height()-self.bar_height)/2, w, self.bar_height)
+        
+        # Check handles
+        clicked_handle = -1
+        for i, (p, c) in enumerate(self.stops):
+            cx = self.margin_x + p * w
+            cy = bar_rect.bottom() + 8
+            # Hit area around handle
+            if abs(pos.x() - cx) < 10 and abs(pos.y() - cy) < 20:
+                clicked_handle = i
+                break
+        
+        if clicked_handle != -1:
+            self.selected_index = clicked_handle
+            self.dragging_index = clicked_handle
+            col = self.stops[self.selected_index][1]
+            self.stopSelected.emit([c/255.0 for c in col])
+        elif bar_rect.contains(pos):
+            # Add stop
+            rel_x = (pos.x() - self.margin_x) / w
+            rel_x = max(0.0, min(1.0, rel_x))
+            
+            # Interpolate color roughly
+            new_col = [128, 128, 128] # Default
+            # Simple find neighbor
+            sorted_s = sorted(self.stops, key=lambda x: x[0])
+            for k in range(len(sorted_s)-1):
+                if sorted_s[k][0] <= rel_x <= sorted_s[k+1][0]:
+                    ratio = (rel_x - sorted_s[k][0]) / (sorted_s[k+1][0] - sorted_s[k][0])
+                    c1 = sorted_s[k][1]
+                    c2 = sorted_s[k+1][1]
+                    new_col = [int(c1[j]*(1-ratio) + c2[j]*ratio) for j in range(3)]
+                    break
+            
+            self.stops.append([rel_x, new_col])
+            self.selected_index = len(self.stops) - 1
+            self.dragging_index = self.selected_index
+            self.stopSelected.emit([c/255.0 for c in new_col])
+            self.gradientChanged.emit(self.stops)
+            
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        pos = event.position()
+        w = self.width() - 2*self.margin_x
+        
+        if self.dragging_index != -1:
+            rel_x = (pos.x() - self.margin_x) / w
+            rel_x = max(0.0, min(1.0, rel_x))
+            self.stops[self.dragging_index][0] = rel_x
+            self.gradientChanged.emit(self.stops)
+            self.update()
+            return
+
+        # Hover check
+        self.hover_index = -1
+        bar_rect = QRectF(self.margin_x, (self.height()-self.bar_height)/2, w, self.bar_height)
+        for i, (p, c) in enumerate(self.stops):
+            cx = self.margin_x + p * w
+            cy = bar_rect.bottom() + 8
+            if abs(pos.x() - cx) < 10 and abs(pos.y() - cy) < 20:
+                self.hover_index = i
+                break
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        self.dragging_index = -1
+
+    def mouseDoubleClickEvent(self, event):
+        # Remove stop if clicked, but keep at least 2
+        if len(self.stops) <= 2: return
+        
+        pos = event.position()
+        w = self.width() - 2*self.margin_x
+        bar_rect = QRectF(self.margin_x, (self.height()-self.bar_height)/2, w, self.bar_height)
+        
+        for i, (p, c) in enumerate(self.stops):
+            cx = self.margin_x + p * w
+            cy = bar_rect.bottom() + 8
+            if abs(pos.x() - cx) < 10 and abs(pos.y() - cy) < 20:
+                self.stops.pop(i)
+                self.selected_index = -1
+                self.gradientChanged.emit(self.stops)
+                self.update()
+                break
+
 # === Generator Status Widget ===
 class GeneratorStatusWidget(QFrame):
     copyRequested = pyqtSignal(QImage)

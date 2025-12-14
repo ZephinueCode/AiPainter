@@ -9,6 +9,58 @@ from PyQt6.QtGui import QPixmap, QImage
 import json
 import os
 from src.agent.agent_manager import AIAgentManager
+from src.gui.widgets import GradientSlider, ColorPickerWidget
+from src.core.processor import ImageProcessor
+
+# === Gradient Map Dialog ===
+class GradientMapDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Gradient Map")
+        self.resize(300, 500)
+        
+        self.preview_layer = parent.active_layer
+        self.original_img = self.preview_layer.get_image()
+        
+        layout = QVBoxLayout(self)
+        
+        # Color Picker Area
+        self.color_picker = ColorPickerWidget()
+        layout.addWidget(self.color_picker)
+        
+        # Gradient Slider
+        self.slider = GradientSlider()
+        layout.addWidget(self.slider)
+        
+        # Connections
+        self.slider.stopSelected.connect(self.color_picker.set_color)
+        self.slider.gradientChanged.connect(self.on_gradient_changed)
+        self.color_picker.colorChanged.connect(self.slider.set_current_stop_color)
+        
+        # Buttons
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+        
+        # Initial apply
+        self.on_gradient_changed(self.slider.stops)
+
+    def on_gradient_changed(self, stops):
+        # stops: [[pos, [r,g,b]], ...]
+        # Convert to tuple format for processor
+        proc_stops = []
+        for s in stops:
+            proc_stops.append((s[0], (s[1][0], s[1][1], s[1][2])))
+            
+        new_img = ImageProcessor.apply_gradient_map(self.original_img, proc_stops)
+        self.preview_layer.load_from_image(new_img)
+        self.parent().update()
+
+    def reject(self):
+        self.preview_layer.load_from_image(self.original_img)
+        self.parent().update()
+        super().reject()
 
 # === Anchor Selection Widget (for Canvas Resize) ===
 class AnchorWidget(QWidget):
