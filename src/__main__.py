@@ -230,6 +230,8 @@ class MainWindow(QMainWindow):
     def on_save_project(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save Project", "", "GL Project (*.glp)")
         if path:
+            if not path.endswith(".glp"):
+                path += ".glp"
             self.canvas.save_project(path)
             self.statusBar().showMessage(f"Project saved: {path}")
 
@@ -247,6 +249,8 @@ class MainWindow(QMainWindow):
     def on_export_flat(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export Flat Image", "", "PNG Files (*.png);;JPEG Files (*.jpg)")
         if path:
+            if not path.endswith(".png") and not path.endswith(".jpg"):
+                path += ".png"
             self.canvas.export_image(path)
             self.statusBar().showMessage(f"Exported to {path}")
 
