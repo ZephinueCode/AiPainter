@@ -65,6 +65,9 @@ class ImageGenerator(QObject):
                     negative_prompt=negative_prompt,
                     size=size 
                 )
+                print("--- 原始数据 ---")
+                print(response)
+                print("------------------------")
 
                 if response.status_code == 200:
                     try:
