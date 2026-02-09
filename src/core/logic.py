@@ -83,6 +83,19 @@ class PaintLayer(Node):
             self.uuid = str(uuid.uuid4())
         d["uuid"] = self.uuid
         return d
+    
+    def to_pil(self):
+        #将当前图层的 OpenGL 纹理读回并转换为 PIL Image (RGBA)
+        glBindTexture(GL_TEXTURE_2D, self.texture)
+        # 获取纹理数据
+        data = glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE)
+        
+        # 转换为 numpy 数组
+        img_np = np.frombuffer(data, dtype=np.uint8).reshape((self.height, self.width, 4))
+        
+        # OpenGL 坐标系 y 轴是反的，需要垂直翻转
+        img_pil = Image.fromarray(img_np).transpose(Image.FLIP_TOP_BOTTOM)
+        return img_pil
 
     def load_from_image(self, pil_image):
         if self.width != pil_image.width or self.height != pil_image.height:
@@ -241,3 +254,34 @@ class ProjectLogic:
                 l.load_from_image(pil_img); parent_node.add_child(l)
         for layer in reversed(list(psd)): process_psd_layer(layer, root)
         return width, height, root
+    
+    @staticmethod
+    def create_group_from_images(images, names, doc_width, doc_height):
+        """
+        将 PIL.Image 列表转换为一个 GroupLayer
+        """
+        # 创建一个组，名字随机防止冲突
+        group_name = f"AI_Gen_{uuid.uuid4().hex[:4]}"
+        group = GroupLayer(group_name)
+        
+        # 倒序遍历：因为在图层树中，列表第一个通常是背景(最底层)
+        # 但在 add_child 时如果直接 append，第一个加进去的在列表最前
+        # 你的渲染顺序 logic 决定了 background 应该在 list 的哪里
+        # 假设: canvas渲染是按 list 顺序渲染，则 list[0] 是背景
+        
+        for img, name in zip(images, names):
+            # 1. 创建图层
+            layer = PaintLayer(doc_width, doc_height, name)
+            
+            # 2. 智能缩放 (如果 AI 生成的是 1024x1024，而画布是 1920x1080)
+            # 这里选择保持比例居中，或者拉伸，取决于需求。这里演示拉伸填满：
+            if img.size != (doc_width, doc_height):
+                img = img.resize((doc_width, doc_height), Image.Resampling.LANCZOS)
+            
+            # 3. 载入纹理 (这一步需要 OpenGL 上下文，所以必须在主线程调用)
+            layer.load_from_image(img)
+            
+            # 4. 加入组
+            group.add_child(layer)
+            
+        return group

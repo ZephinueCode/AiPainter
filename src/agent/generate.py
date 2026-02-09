@@ -4,10 +4,12 @@ import threading
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QImage
+from PIL import Image
 from src.agent.agent_manager import AIAgentManager
 import io
 import json
 import os
+import replicate
 
 try:
     import dashscope
@@ -18,6 +20,8 @@ except ImportError:
 
 class ImageGenerator(QObject):
     generation_finished = pyqtSignal(object, str) # (QImage or None, error_message)
+    # [新增] 多图层信号: (图片列表, 图层名列表, 错误信息)
+    layered_generation_finished = pyqtSignal(list, list, str)
 
     def __init__(self):
         super().__init__()
@@ -144,3 +148,67 @@ class ImageGenerator(QObject):
 
             except Exception as e:
                 self.generation_finished.emit(None, f"OpenAI Error: {str(e)}")
+    
+    def generate_layered(self, prompt, input_image=None, num_layers=4):
+        """
+        统一的外部调用入口。
+        负责开启异步线程，确保不阻塞主界面。
+        """
+        if input_image is None:
+            self.layered_generation_finished.emit([], [], "错误：未提供输入图像")
+            return
+
+        # 开启线程执行真正的 API 逻辑
+        thread = threading.Thread(
+            target=self._execute_replicate_task, 
+            args=(prompt, input_image, num_layers),
+            daemon=True # 设置为守护线程，程序退出时自动结束
+        )
+        thread.start()
+
+    def _execute_replicate_task(self, prompt, input_image, num_layers):
+        """
+        私有方法：负责 Replicate API 的具体交互流程。
+        """
+        try:
+            # 1. 准备图片数据
+            img_byte_arr = io.BytesIO()
+            input_image.save(img_byte_arr, format='PNG')
+            img_byte_arr.seek(0)
+
+            # 2. 调用模型 (使用最新的稳定版 ID)
+            # 也可以把模型 ID 抽离成类常量
+            MODEL_ID = "qwen/qwen-image-layered"
+
+            print(f"AI 正在处理...")
+            output = replicate.run(
+                MODEL_ID,
+                input={
+                    "image": img_byte_arr,
+                    "num_layers": num_layers,
+                    "go_fast": True,
+                }
+            )
+
+            # 3. 处理输出结果
+            # Replicate 1.0+ 版本的返回对象支持直接 read() 或访问 url
+            pil_images = []
+            layer_names = []
+            
+            for i, layer_file in enumerate(output):
+                # 直接通过 URL 读取数据，减少本地文件落地的中间环节
+                response = requests.get(layer_file.url, timeout=10)
+                if response.status_code == 200:
+                    img = Image.open(io.BytesIO(response.content)).convert("RGBA")
+                    pil_images.append(img)
+                    
+                    # 命名逻辑：0是背景，其余是物体
+                    name = "AI_Background" if i == 0 else f"AI_Object_{i}"
+                    layer_names.append(name)
+
+            # 4. 成功后发射信号
+            self.layered_generation_finished.emit(pil_images, layer_names, "")
+
+        except Exception as e:
+            # 捕获所有可能的网络或 API 错误并返回
+            self.layered_generation_finished.emit([], [], f"AI 服务异常: {str(e)}")

@@ -13,6 +13,7 @@ from src.core.tools import RectSelectTool, LassoTool, BucketTool, PickerTool, Sm
 from src.core.processor import ImageProcessor
 from src.gui.dialogs import GradientMapDialog, AdjustmentDialog
 
+
 class GLCanvas(QOpenGLWidget):
     layer_structure_changed = pyqtSignal()
     view_changed = pyqtSignal()
@@ -318,6 +319,7 @@ class GLCanvas(QOpenGLWidget):
         act_paste.setEnabled(can_paste)
         
         menu.addSeparator()
+        menu.addAction("✨ AI Generate Layered (Test)", self.test_trigger_ai)#for test
         menu.addAction("HSL Adjustment", lambda: self.open_adjustment("HSL"))
         menu.addAction("Contrast", lambda: self.open_adjustment("Contrast"))
         menu.addAction("Exposure", lambda: self.open_adjustment("Exposure"))
@@ -325,6 +327,79 @@ class GLCanvas(QOpenGLWidget):
         menu.addAction("Gradient Map...", self.open_gradient_map)
         
         menu.exec(event.globalPosition().toPoint())
+    
+    def test_trigger_ai(self):
+        """一键拆分当前图层工作流"""
+        if not self.active_layer or not isinstance(self.active_layer, PaintLayer):
+            QMessageBox.warning(self, "AI 提示", "请先选中一个绘图图层。")
+            return
+
+        # 1. 弹窗询问 (可选)
+        from PyQt6.QtWidgets import QInputDialog
+        text, ok = QInputDialog.getText(self, "Qwen Layered AI", "输入描述 (或直接点击确定进行拆分):")
+        if not ok: return
+
+        # 2. 提取当前图层作为 AI 输入
+        self.makeCurrent() # 必须激活上下文才能读纹理
+        input_pil = self.active_layer.to_pil()
+
+        # 3. 准备生成器
+        from src.agent.generate import ImageGenerator
+        self.current_generator = ImageGenerator()
+        # 连接信号到你之前定义的 handle_layered_generation
+        self.current_generator.layered_generation_finished.connect(self.handle_layered_generation)
+
+        # 4. 开始推理
+        print("AI 正在解析图层，请稍候...")
+        self.current_generator.generate_layered(prompt=text, input_image=input_pil, num_layers=4)
+
+    def handle_layered_generation(self, images, names, error_msg):
+        """
+        回调槽函数：在主线程中执行，处理生成的图片并转为 OpenGL 图层
+        """
+        if error_msg:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "生成失败", error_msg)
+            return
+
+        if not images:
+            return
+
+        print(f"收到 {len(images)} 个图层，正在导入工作流...")
+
+        # --- 核心步骤 ---
+        
+        # 1. 激活当前 OpenGL 上下文 (非常重要！)
+        # 因为 ProjectLogic.create_group_from_images 内部会调用 load_from_image (含 glGenTextures)
+        self.makeCurrent()
+
+        try:
+            # 2. 调用你在 logic.py 中定义的静态方法
+            # 这会把 PIL 序列转换成包含多个 PaintLayer 的 GroupLayer
+            ai_group = ProjectLogic.create_group_from_images(
+                images, 
+                names, 
+                self.doc_width, 
+                self.doc_height
+            )
+
+            # 3. 插入工作流：将其挂载到图层树的根节点
+            self.root.add_child(ai_group)
+
+            # 4. 交互优化：激活新生成的组中最后一个图层（最顶层）
+            if ai_group.children:
+                self.active_layer = ai_group.children[-1]
+
+            # 5. 通知 UI 系统更新
+            self.layer_structure_changed.emit() # 通知图层面板刷新列表
+            self.view_changed.emit()            # 触发画布重绘
+            self.update()                       # 强制 QOpenGLWidget 刷新
+            
+            print("分层图像已成功插入工作流。")
+
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "导入错误", f"处理 AI 图层时出错: {str(e)}")
 
     def open_adjustment(self, type):
         if not self.active_layer or not isinstance(self.active_layer, PaintLayer): return

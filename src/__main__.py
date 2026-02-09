@@ -23,6 +23,9 @@ if hasattr(Qt.ApplicationAttribute, 'AA_EnableHighDpiScaling'):
 if hasattr(Qt.ApplicationAttribute, 'AA_UseHighDpiPixmaps'):
     QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
 
+#Qwen-Image-Layered API
+os.environ["REPLICATE_API_TOKEN"] = "r8_HKGBCxZipa0jGm7Ey3nQIaZ5xBs0kNN0Cf55i"
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
