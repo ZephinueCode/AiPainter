@@ -209,6 +209,10 @@ class ProjectLogic:
             def save_layer_images(node):
                 if isinstance(node, PaintLayer):
                     img = node.get_image()
+                    # --- 调试代码 ---
+                    save_path = os.path.join(temp_dir, f"{node.uuid}.png")
+                    print(f"正在保存图层: {node.name}, UUID: {node.uuid}, 路径: {save_path}")
+                    # ----------------
                     img.save(os.path.join(temp_dir, f"{node.uuid}.png"))
                 if hasattr(node, 'children'):
                     for child in node.children: save_layer_images(child)
@@ -239,6 +243,39 @@ class ProjectLogic:
                     parent.add_child(l)
             for child_data in data["root"]["children"]: build_tree(child_data, root)
             return width, height, root
+        
+    @staticmethod
+    def open_img(file_path):
+        try:
+            img = Image.open(file_path)
+            if img.mode != "RGBA":
+                img = img.convert("RGBA")
+
+            img_data = img.tobytes("raw", "RGBA", 0, -1)
+            width, height = img.size
+
+            #生成 OpenGL 纹理
+            texture_id = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_2D, texture_id)
+
+            
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+
+            
+            glTexImage2D(
+                GL_TEXTURE_2D, 0, GL_RGBA, width, height, 
+                0, GL_RGBA, GL_UNSIGNED_BYTE, img_data
+            )
+
+            glBindTexture(GL_TEXTURE_2D, 0)
+            return texture_id, width, height
+
+        except Exception as e:
+            print(f"无法加载图片 {file_path}: {e}")
+            return None, 0, 0
 
     @staticmethod
     def import_psd(path, current_width, current_height):
@@ -272,6 +309,7 @@ class ProjectLogic:
         for img, name in zip(images, names):
             # 1. 创建图层
             layer = PaintLayer(doc_width, doc_height, name)
+            layer.uuid = str(uuid.uuid4())
             
             # 2. 智能缩放 (如果 AI 生成的是 1024x1024，而画布是 1920x1080)
             # 这里选择保持比例居中，或者拉伸，取决于需求。这里演示拉伸填满：

@@ -140,6 +140,9 @@ class MainWindow(QMainWindow):
         
         self.act_open_proj = QAction("Open Project (.glp)...", self)
         self.act_open_proj.triggered.connect(self.on_open_project)
+
+        self.act_open_img = QAction("Open Image ...",self)
+        self.act_open_img.triggered.connect(self.on_open_image)
         
         self.act_import = QAction("Import PSD...", self)
         self.act_import.triggered.connect(self.on_import_psd)
@@ -176,6 +179,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_save_proj)
         file_menu.addSeparator()
         file_menu.addAction(self.act_import)
+        file_menu.addAction(self.act_open_img) # jpg & png
         file_menu.addAction(self.act_export_flat)
         file_menu.addSeparator()
         file_menu.addAction(self.act_settings)
@@ -243,6 +247,13 @@ class MainWindow(QMainWindow):
         if path:
             self.canvas.load_project(path)
             self.statusBar().showMessage(f"Project loaded: {path}")
+
+    def on_open_image(self):
+        filters = "Image Files (*.jpg *.jpeg *.png);;PNG Files (*.png);;JPEG Files (*.jpg *.jpeg);;All Files (*)"
+        paths, _ = QFileDialog.getOpenFileNames(self, "Import Image", "", filters)
+        for path in paths:
+            self.canvas.open_img(path)
+
 
     def on_import_psd(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import PSD", "", "PSD Files (*.psd);;All Files (*)")

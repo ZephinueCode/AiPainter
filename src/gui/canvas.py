@@ -185,13 +185,17 @@ class GLCanvas(QOpenGLWidget):
 
     def _render_node(self, node):
         if not node.visible: return
+        glPushMatrix()
         if isinstance(node, GroupLayer):
             for child in node.children:
                 self._render_node(child)
         elif isinstance(node, PaintLayer):
+            glEnable(GL_TEXTURE_2D)
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
             glBindTexture(GL_TEXTURE_2D, node.texture)
             op = node.opacity * self._get_parent_opacity(node)
-            glColor4f(op, op, op, op) 
+            glColor4f(1.0, 1.0, 1.0, op) 
             
             glBegin(GL_QUADS)
             glTexCoord2f(0, 1); glVertex2f(0, 0)
@@ -199,6 +203,19 @@ class GLCanvas(QOpenGLWidget):
             glTexCoord2f(1, 0); glVertex2f(node.width, node.height)
             glTexCoord2f(1, 1); glVertex2f(node.width, 0)
             glEnd()
+            glDisable(GL_TEXTURE_2D)
+            if hasattr(self, 'active_layer') and node == self.active_layer:
+                glDisable(GL_TEXTURE_2D)
+                glColor4f(0.0, 0.6, 1.0, 1.0) # 亮蓝色
+                glLineWidth(20.0)
+                glBegin(GL_LINE_LOOP)
+                glVertex2f(0, 0)
+                glVertex2f(node.width, 0)
+                glVertex2f(node.width, node.height)
+                glVertex2f(0, node.height)
+                glEnd()
+                glEnable(GL_TEXTURE_2D)
+        glPopMatrix()
 
     def _get_parent_opacity(self, node):
         op = 1.0
@@ -471,6 +488,28 @@ class GLCanvas(QOpenGLWidget):
         self.makeCurrent()
         ProjectLogic.save_project(self.root, self.doc_width, self.doc_height, path)
 
+    def open_img(self, path):
+        try:
+            import os
+            import uuid
+            self.makeCurrent()
+            tex_id, w, h = ProjectLogic.open_img(path)
+            if tex_id:
+                ratio = min(self.doc_width / w, self.doc_height / h)
+                display_w = int(w * ratio)
+                display_h = int(h * ratio)
+
+            # 创建新的图层对象
+                new_layer = PaintLayer(display_w, display_h, os.path.basename(path))
+                new_layer.texture = tex_id
+                new_layer.uuid = str(uuid.uuid4())
+            
+            # 将其加入到图层树中
+            self.root.add_child(new_layer)
+            self.layer_structure_changed.emit()
+            self.update()
+        except Exception as e: print(e)
+
     def import_psd(self, path):
         try:
             self.makeCurrent()
@@ -481,14 +520,30 @@ class GLCanvas(QOpenGLWidget):
 
     def export_image(self, path):
         self.makeCurrent()
-        fbo = glGenFramebuffers(1); tex = glGenTextures(1)
+        fbo = glGenFramebuffers(1)
+        tex = glGenTextures(1)
         glBindTexture(GL_TEXTURE_2D, tex)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, self.doc_width, self.doc_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo); glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0)
-        glViewport(0, 0, self.doc_width, self.doc_height); glClearColor(0,0,0,0); glClear(GL_COLOR_BUFFER_BIT)
-        glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, self.doc_width, self.doc_height, 0, -1, 1)
-        glMatrixMode(GL_MODELVIEW); glLoadIdentity()
-        glEnable(GL_TEXTURE_2D); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0)
+        glViewport(0, 0, self.doc_width, self.doc_height)
+        glClearColor(1,0,0,1)
+        glClear(GL_COLOR_BUFFER_BIT)
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        glOrtho(0, self.doc_width, self.doc_height, 0, -1, 1)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        glEnable(GL_BLEND) 
+        glEnable(GL_TEXTURE_2D)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        print("开始渲染导出...")
+        def debug_nodes(node):
+            if isinstance(node, PaintLayer):
+                print(f"正在渲染层: {node.name}, 纹理ID: {node.texture}, 可见性: {node.visible}")
+            if hasattr(node, 'children'):
+                for c in node.children: debug_nodes(c)
+        debug_nodes(self.root)
         self._render_node(self.root)
         data = glReadPixels(0, 0, self.doc_width, self.doc_height, GL_RGBA, GL_UNSIGNED_BYTE)
         Image.frombytes("RGBA", (self.doc_width, self.doc_height), data).transpose(Image.FLIP_TOP_BOTTOM).save(path)
@@ -638,6 +693,7 @@ class CanvasWidget(QWidget):
     def initializeGL(self): self.gl_canvas.initializeGL()
     def update(self): super().update(); self.gl_canvas.update()
     def import_psd(self, path): self.gl_canvas.import_psd(path)
+    def open_img(self,path): self.gl_canvas.open_img(path)
     def save_project(self, path): self.gl_canvas.save_project(path)
     def export_image(self, path): self.gl_canvas.export_image(path)
     def set_brush(self, config): self.gl_canvas.set_brush(config)
