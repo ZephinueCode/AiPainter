@@ -245,9 +245,9 @@ class ProjectLogic:
             return width, height, root
         
     @staticmethod
-    def open_img(file_path):
+    def open_img(path):
         try:
-            img = Image.open(file_path)
+            img = Image.open(path)
             if img.mode != "RGBA":
                 img = img.convert("RGBA")
 
@@ -274,7 +274,7 @@ class ProjectLogic:
             return texture_id, width, height
 
         except Exception as e:
-            print(f"无法加载图片 {file_path}: {e}")
+            print(f"无法加载图片 {path}: {e}")
             return None, 0, 0
 
     @staticmethod

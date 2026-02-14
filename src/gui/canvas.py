@@ -12,6 +12,16 @@ from src.core.logic import Node, GroupLayer, PaintLayer, PaintCommand, UndoStack
 from src.core.tools import RectSelectTool, LassoTool, BucketTool, PickerTool, SmudgeTool, TextTool, ClipboardUtils
 from src.core.processor import ImageProcessor
 from src.gui.dialogs import GradientMapDialog, AdjustmentDialog
+import os
+import uuid
+from pytoshop.user import nested_layers
+from pytoshop import enums
+import pytoshop
+import packbits
+import pytoshop.core
+import pytoshop.layers
+pytoshop.core.packbits = packbits
+pytoshop.layers.packbits = packbits
 
 
 class GLCanvas(QOpenGLWidget):
@@ -490,8 +500,7 @@ class GLCanvas(QOpenGLWidget):
 
     def open_img(self, path):
         try:
-            import os
-            import uuid
+
             self.makeCurrent()
             tex_id, w, h = ProjectLogic.open_img(path)
             if tex_id:
@@ -548,6 +557,84 @@ class GLCanvas(QOpenGLWidget):
         data = glReadPixels(0, 0, self.doc_width, self.doc_height, GL_RGBA, GL_UNSIGNED_BYTE)
         Image.frombytes("RGBA", (self.doc_width, self.doc_height), data).transpose(Image.FLIP_TOP_BOTTOM).save(path)
         glDeleteFramebuffers(1, [fbo]); glDeleteTextures([tex]); glBindFramebuffer(GL_FRAMEBUFFER, 0)
+
+    def export_to_psd(self, path):
+        self.makeCurrent()
+        glPixelStorei(GL_PACK_ALIGNMENT, 1)
+
+        def process_node(node):
+            # 调试：看看遍历到了什么
+            print(f"正在处理节点: {node.name}, 类型: {type(node)}")
+            type_name = type(node).__name__
+
+            if "GroupLayer" in type_name:
+                sub_layers = []
+                for child in node.children:
+                    res = process_node(child)
+                    if res: sub_layers.append(res)
+                
+                group = nested_layers.Group()
+                group.name = node.name
+                group.layers = sub_layers
+                group.closed = False
+                group.opacity = int(node.opacity * 255)
+                group.visible = node.visible
+                return group
+
+            elif isinstance(node, PaintLayer):
+                if not node.texture: return None
+                
+                glBindTexture(GL_TEXTURE_2D, node.texture)
+                raw_data = glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE)
+                img = Image.frombytes("RGBA", (node.width, node.height), raw_data)
+                img = img.transpose(Image.FLIP_TOP_BOTTOM)
+                
+                bbox = img.getbbox()
+                if not bbox:
+                    # 遇到完全空白的图层，直接跳过，防止 pytoshop 崩溃
+                    return None
+
+                img = img.crop(bbox)
+                left, top, right, bottom = bbox[0], bbox[1], bbox[2], bbox[3]
+                img_np = np.array(img)
+                
+                channels = {
+                    0: img_np[:, :, 0], 
+                    1: img_np[:, :, 1], 
+                    2: img_np[:, :, 2], 
+                    -1: img_np[:, :, 3]  
+                }
+                layer = nested_layers.Image(
+                    name=node.name,
+                    top=top,
+                    left=left,
+                    bottom=bottom,
+                    right=right,
+                    channels=channels,
+                    opacity=int(node.opacity * 255),
+                    visible=node.visible,
+                    color_mode=enums.ColorMode.rgb
+                )
+                layer.mask = None
+                return layer
+            return None
+        all_layers = []
+        for child in reversed(self.root.children):
+            layer_obj = process_node(child)
+            if layer_obj:
+                all_layers.append(layer_obj)
+
+        if not all_layers:
+            print("拦截：画布完全为空，没有像素可以导出。")
+            return
+        try:
+            psd = nested_layers.nested_layers_to_psd(all_layers, color_mode=enums.ColorMode.rgb)
+            
+            with open(path, 'wb') as f:
+                psd.write(f)
+            print(f"PSD 成功导出！包含图层组结构：{path}")
+        except Exception as e:
+            print(f"pytoshop 最终合并失败: {e}")
 
     def set_brush(self, config):
         self.current_brush = config
@@ -696,6 +783,7 @@ class CanvasWidget(QWidget):
     def open_img(self,path): self.gl_canvas.open_img(path)
     def save_project(self, path): self.gl_canvas.save_project(path)
     def export_image(self, path): self.gl_canvas.export_image(path)
+    def export_psd(self, path): self.gl_canvas.export_to_psd(path)
     def set_brush(self, config): self.gl_canvas.set_brush(config)
     def resize_canvas_smart(self, w, h, anchor): self.gl_canvas.resize_canvas_smart(w, h, anchor)
     def load_project(self, path): self.gl_canvas.load_project(path)

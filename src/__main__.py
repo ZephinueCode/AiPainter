@@ -149,6 +149,9 @@ class MainWindow(QMainWindow):
         
         self.act_export_flat = QAction("Export Flat Image...", self)
         self.act_export_flat.triggered.connect(self.on_export_flat)
+
+        self.act_export_psd = QAction("Export PSD...", self)
+        self.act_export_psd.triggered.connect(self.on_export_psd)
         
         self.act_settings = QAction("Settings...", self)
         self.act_settings.triggered.connect(self.on_settings)
@@ -181,6 +184,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_import)
         file_menu.addAction(self.act_open_img) # jpg & png
         file_menu.addAction(self.act_export_flat)
+        file_menu.addAction(self.act_export_psd)
         file_menu.addSeparator()
         file_menu.addAction(self.act_settings)
         
@@ -266,6 +270,12 @@ class MainWindow(QMainWindow):
             if not path.endswith(".png") and not path.endswith(".jpg"):
                 path += ".png"
             self.canvas.export_image(path)
+            self.statusBar().showMessage(f"Exported to {path}")
+    
+    def on_export_psd(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Export PSD", "", "PSD Files (*.psd);;All Files (*)")
+        if path:
+            self.canvas.export_psd(path)
             self.statusBar().showMessage(f"Exported to {path}")
 
     def on_settings(self):
