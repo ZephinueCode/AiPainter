@@ -76,6 +76,7 @@ class ToolsPanel(QWidget):
     def __init__(self, on_tool_selected):
         super().__init__()
         self.on_tool_selected = on_tool_selected
+        self._active_tool_name = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
         
@@ -87,6 +88,7 @@ class ToolsPanel(QWidget):
         tools = [
             ("Rect Select", "[ ]"), 
             ("Lasso", " @ "),
+            ("Magic Wand", " ✦ "),
             ("Fill Select", "\\_/"),
             ("Picker", " + "),
             ("Smudge", " ~ "),
@@ -100,10 +102,142 @@ class ToolsPanel(QWidget):
                 QPushButton { text-align: left; padding-left: 20px; font-family: monospace; font-size: 13px; }
                 QPushButton:hover { background-color: #e0e0e0; }
             """)
-            btn.clicked.connect(lambda checked, n=name: self.on_tool_selected(n))
+            btn.clicked.connect(lambda checked, n=name: self._on_tool_btn_clicked(n))
             layout.addWidget(btn)
-        
+
+        # === Magic Wand Options Panel (hidden by default) ===
+        self.wand_panel = QGroupBox("🪄 AI Wand Options")
+        self.wand_panel.setVisible(False)
+        wand_layout = QVBoxLayout(self.wand_panel)
+        wand_layout.setContentsMargins(8, 8, 8, 8)
+        wand_layout.setSpacing(4)
+
+        # Description
+        desc = QLabel("Left-click to add positive points,\nright-click for negative.\nEnter to apply / Esc to cancel")
+        desc.setStyleSheet("color: #888; font-size: 10px;")
+        desc.setWordWrap(True)
+        wand_layout.addWidget(desc)
+
+        # Positive / Negative mode
+        mode_layout = QHBoxLayout()
+        from PyQt6.QtWidgets import QRadioButton, QButtonGroup
+        self._wand_mode_group = QButtonGroup(self)
+        self._wand_positive = QRadioButton("✅ Positive")
+        self._wand_positive.setChecked(True)
+        self._wand_negative = QRadioButton("❌ Negative")
+        self._wand_mode_group.addButton(self._wand_positive, 1)
+        self._wand_mode_group.addButton(self._wand_negative, 0)
+        mode_layout.addWidget(self._wand_positive)
+        mode_layout.addWidget(self._wand_negative)
+        wand_layout.addLayout(mode_layout)
+        self._wand_mode_group.idToggled.connect(self._on_wand_mode_changed)
+
+        # Point info
+        self._wand_info_label = QLabel("Pos: 0  Neg: 0")
+        self._wand_info_label.setStyleSheet("color: #666; font-size: 10px;")
+        wand_layout.addWidget(self._wand_info_label)
+
+        # Status info
+        self._wand_status_label = QLabel("")
+        self._wand_status_label.setStyleSheet("color: #c08000; font-size: 10px;")
+        self._wand_status_label.setWordWrap(True)
+        self._wand_status_label.setVisible(False)
+        wand_layout.addWidget(self._wand_status_label)
+
+        # Buttons
+        btn_row1 = QHBoxLayout()
+        self._wand_undo_btn = QPushButton("↩ Undo")
+        self._wand_undo_btn.clicked.connect(self._on_wand_undo)
+        btn_row1.addWidget(self._wand_undo_btn)
+        self._wand_clear_btn = QPushButton("🗑 Clear")
+        self._wand_clear_btn.clicked.connect(self._on_wand_clear)
+        btn_row1.addWidget(self._wand_clear_btn)
+        wand_layout.addLayout(btn_row1)
+
+        self._wand_apply_btn = QPushButton("✔ Apply Selection")
+        self._wand_apply_btn.setStyleSheet(
+            "QPushButton { background-color: #4a9eff; color: white; font-weight: bold; padding: 6px; border-radius: 3px; }"
+            "QPushButton:hover { background-color: #3a8eef; }"
+        )
+        self._wand_apply_btn.clicked.connect(self._on_wand_apply)
+        wand_layout.addWidget(self._wand_apply_btn)
+
+        # Feather / Edge Blur slider (negative = shrink, positive = expand/blur)
+        feather_layout = QHBoxLayout()
+        feather_layout.addWidget(QLabel("Feather:"))
+        self._wand_feather_slider = QSlider(Qt.Orientation.Horizontal)
+        self._wand_feather_slider.setRange(-40, 40)
+        self._wand_feather_slider.setValue(0)
+        self._wand_feather_slider.setToolTip("Edge blur radius (negative = shrink, 0 = sharp, positive = expand)")
+        feather_layout.addWidget(self._wand_feather_slider)
+        self._wand_feather_label = QLabel("0")
+        self._wand_feather_label.setFixedWidth(30)
+        self._wand_feather_slider.valueChanged.connect(
+            lambda v: self._wand_feather_label.setText(str(v))
+        )
+        self._wand_feather_slider.valueChanged.connect(self._on_feather_changed)
+        feather_layout.addWidget(self._wand_feather_label)
+        wand_layout.addLayout(feather_layout)
+
+        layout.addWidget(self.wand_panel)
+        # ====================================================
+
         layout.addStretch()
+
+        # Magic wand tool reference (set by LeftSidebar)
+        self._magic_wand_tool = None
+
+    def set_magic_wand_tool_ref(self, tool):
+        """Set the magic wand tool reference for panel interaction."""
+        self._magic_wand_tool = tool
+        if tool:
+            tool._status_callback = self._update_wand_status
+            # Sync feather slider value to the tool
+            tool.feather = self._wand_feather_slider.value()
+
+    def _on_tool_btn_clicked(self, name):
+        self._active_tool_name = name
+        self.wand_panel.setVisible(name == "Magic Wand")
+        self.on_tool_selected(name)
+
+    def _on_wand_mode_changed(self, id, checked):
+        if checked and self._magic_wand_tool:
+            self._magic_wand_tool.set_point_mode(id)
+
+    def _on_wand_undo(self):
+        if self._magic_wand_tool:
+            self._magic_wand_tool.undo_last_point()
+            self._refresh_wand_info()
+
+    def _on_wand_clear(self):
+        if self._magic_wand_tool:
+            self._magic_wand_tool.clear_all_points()
+            self._refresh_wand_info()
+
+    def _on_wand_apply(self):
+        if self._magic_wand_tool:
+            feather = self._wand_feather_slider.value()
+            self._magic_wand_tool.apply_as_selection(feather=feather)
+            self._refresh_wand_info()
+            # Hide wand panel since tool auto-switched to Rect Select
+            self.wand_panel.setVisible(False)
+            self._active_tool_name = "Rect Select"
+
+    def _on_feather_changed(self, value):
+        """Live-update the feather value on the tool and refresh the mask overlay."""
+        if self._magic_wand_tool:
+            self._magic_wand_tool.feather = value
+            self._magic_wand_tool.canvas.update()  # trigger overlay repaint
+
+    def _refresh_wand_info(self):
+        if self._magic_wand_tool:
+            pos, neg = self._magic_wand_tool.get_point_counts()
+            self._wand_info_label.setText(f"Pos: {pos}  Neg: {neg}")
+
+    def _update_wand_status(self, msg):
+        self._wand_status_label.setText(msg)
+        self._wand_status_label.setVisible(bool(msg))
+        self._refresh_wand_info()
 
 class AIPanel(QWidget):
     def __init__(self):
@@ -131,8 +265,11 @@ class AIPanel(QWidget):
         dlg.exec()
 
 class LeftSidebar(QWidget):
-    def __init__(self, brush_manager, on_brush_selected, on_tool_selected):
+    def __init__(self, brush_manager, on_brush_selected, on_tool_selected, canvas=None):
         super().__init__()
+        self._canvas = canvas
+        self._original_tool_cb = on_tool_selected
+        
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -142,13 +279,33 @@ class LeftSidebar(QWidget):
         
         self._add_divider(layout)
 
-        self.tools_panel = ToolsPanel(on_tool_selected)
+        self.tools_panel = ToolsPanel(self._on_tool_selected_wrapper)
         layout.addWidget(self.tools_panel, 1)
 
         self._add_divider(layout)
 
         self.ai_panel = AIPanel()
         layout.addWidget(self.ai_panel, 1)
+
+    def _on_tool_selected_wrapper(self, tool_name):
+        """Intercept tool selection to wire up the magic wand tool reference."""
+        self._original_tool_cb(tool_name)
+        
+        # Connect magic wand tool reference
+        if tool_name == "Magic Wand" and self._canvas:
+            gl = self._canvas.gl_canvas if hasattr(self._canvas, 'gl_canvas') else self._canvas
+            if gl.active_tool and hasattr(gl.active_tool, 'set_point_mode'):
+                self.tools_panel.set_magic_wand_tool_ref(gl.active_tool)
+            # Register auto-switch callback so panel updates when tool changes itself
+            gl._tool_switched_callback = self._on_tool_auto_switched
+        else:
+            self.tools_panel.set_magic_wand_tool_ref(None)
+
+    def _on_tool_auto_switched(self, tool_name):
+        """Called when a tool (e.g. MagicWand) auto-switches to another tool."""
+        self.tools_panel._active_tool_name = tool_name
+        self.tools_panel.wand_panel.setVisible(tool_name == "Magic Wand")
+        self.tools_panel.set_magic_wand_tool_ref(None)
 
     def _add_divider(self, layout):
         line = QFrame()

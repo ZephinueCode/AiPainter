@@ -230,6 +230,56 @@ class SettingsDialog(QDialog):
         
         self.tabs.addTab(self.tab_ai, "AI Settings")
 
+        # --- Tab 4: MobileSAM Model Management ---
+        self.tab_sam = QWidget()
+        layout_sam = QVBoxLayout(self.tab_sam)
+
+        sam_title = QLabel("MobileSAM Model Management")
+        sam_title.setStyleSheet("font-weight: bold; font-size: 13px;")
+        layout_sam.addWidget(sam_title)
+
+        sam_desc = QLabel(
+            "MobileSAM is a lightweight image segmentation model\n"
+            "used by the AI Magic Wand tool.\n"
+            "It will be downloaded automatically on first use (~10 MB)."
+        )
+        sam_desc.setWordWrap(True)
+        sam_desc.setStyleSheet("color: #666;")
+        layout_sam.addWidget(sam_desc)
+
+        # Status info
+        form_sam = QFormLayout()
+        self._sam_status_label = QLabel("Checking...")
+        self._sam_size_label = QLabel("—")
+        form_sam.addRow("Status:", self._sam_status_label)
+        form_sam.addRow("File Size:", self._sam_size_label)
+        layout_sam.addLayout(form_sam)
+
+        # Action buttons
+        sam_btn_layout = QHBoxLayout()
+        self._sam_download_btn = QPushButton("Download / Load Model")
+        self._sam_download_btn.clicked.connect(self._on_sam_download)
+        sam_btn_layout.addWidget(self._sam_download_btn)
+
+        self._sam_delete_btn = QPushButton("Delete Model")
+        self._sam_delete_btn.setStyleSheet("QPushButton { color: #c00; }")
+        self._sam_delete_btn.clicked.connect(self._on_sam_delete)
+        sam_btn_layout.addWidget(self._sam_delete_btn)
+        layout_sam.addLayout(sam_btn_layout)
+
+        # Progress
+        self._sam_progress_label = QLabel("")
+        self._sam_progress_label.setWordWrap(True)
+        self._sam_progress_label.setStyleSheet("color: #c08000;")
+        self._sam_progress_label.setVisible(False)
+        layout_sam.addWidget(self._sam_progress_label)
+
+        layout_sam.addStretch()
+        self.tabs.addTab(self.tab_sam, "MobileSAM")
+
+        # Refresh SAM status
+        self._refresh_sam_status()
+
         # Buttons
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
@@ -258,6 +308,86 @@ class SettingsDialog(QDialog):
             self.txt_proxy.text()
         )
         super().accept()
+
+    # --- MobileSAM Management ---
+    def _refresh_sam_status(self):
+        try:
+            from src.agent.mobile_sam_service import MobileSAMService
+            sam = MobileSAMService.instance()
+            if sam.is_loaded:
+                self._sam_status_label.setText("✅ Loaded (ready in memory)")
+                self._sam_status_label.setStyleSheet("color: green; font-weight: bold;")
+            elif sam.is_model_downloaded():
+                self._sam_status_label.setText("📦 Downloaded (not loaded)")
+                self._sam_status_label.setStyleSheet("color: #0066cc;")
+            else:
+                self._sam_status_label.setText("❌ Not downloaded")
+                self._sam_status_label.setStyleSheet("color: #cc0000;")
+            self._sam_size_label.setText(sam.get_model_size_str())
+        except ImportError:
+            self._sam_status_label.setText("⚠️ ultralytics not installed")
+            self._sam_status_label.setStyleSheet("color: #cc0000;")
+            self._sam_size_label.setText("—")
+
+    def _on_sam_download(self):
+        try:
+            from src.agent.mobile_sam_service import MobileSAMService
+            sam = MobileSAMService.instance()
+            if sam.is_loaded:
+                QMessageBox.information(self, "MobileSAM", "Model is already loaded.")
+                return
+
+            self._sam_progress_label.setText("Downloading / loading model, please wait...")
+            self._sam_progress_label.setVisible(True)
+            self._sam_download_btn.setEnabled(False)
+
+            sam.model_loading_msg.connect(self._on_sam_progress)
+            sam.model_load_finished.connect(self._on_sam_load_done)
+            sam.load_model_async()
+        except ImportError:
+            QMessageBox.warning(self, "MobileSAM", "ultralytics is not installed.\nRun: pip install ultralytics")
+
+    def _on_sam_progress(self, msg):
+        self._sam_progress_label.setText(msg)
+
+    def _on_sam_load_done(self, success, msg):
+        self._sam_download_btn.setEnabled(True)
+        self._sam_progress_label.setVisible(False)
+        self._refresh_sam_status()
+        
+        # Disconnect signals
+        try:
+            from src.agent.mobile_sam_service import MobileSAMService
+            sam = MobileSAMService.instance()
+            sam.model_loading_msg.disconnect(self._on_sam_progress)
+            sam.model_load_finished.disconnect(self._on_sam_load_done)
+        except (TypeError, ImportError):
+            pass
+
+        if success:
+            QMessageBox.information(self, "MobileSAM", "Model loaded successfully!")
+        else:
+            QMessageBox.warning(self, "MobileSAM", f"Load failed: {msg}")
+
+    def _on_sam_delete(self):
+        try:
+            from src.agent.mobile_sam_service import MobileSAMService
+            sam = MobileSAMService.instance()
+            
+            reply = QMessageBox.question(
+                self, "Delete Model", 
+                "Are you sure you want to delete the MobileSAM model?\nIt will need to be re-downloaded next time.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                ok, msg = sam.delete_model()
+                self._refresh_sam_status()
+                if ok:
+                    QMessageBox.information(self, "MobileSAM", msg)
+                else:
+                    QMessageBox.warning(self, "MobileSAM", msg)
+        except ImportError:
+            QMessageBox.warning(self, "MobileSAM", "ultralytics is not installed.")
 
     def get_values(self):
         return {

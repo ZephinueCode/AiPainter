@@ -4,12 +4,12 @@ import numpy as np
 from PIL import Image
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtWidgets import QWidget, QScrollBar, QGridLayout, QMenu, QApplication, QMessageBox
-from PyQt6.QtCore import Qt, pyqtSignal, QPointF
-from PyQt6.QtGui import QPainter, QColor, QPainterPath
+from PyQt6.QtCore import Qt, pyqtSignal, QPointF, QRectF
+from PyQt6.QtGui import QPainter, QColor, QPainterPath, QPen
 from OpenGL.GL import *
 from src.core.brush_manager import BrushConfig
 from src.core.logic import Node, GroupLayer, PaintLayer, PaintCommand, UndoStack, ProjectLogic, TextLayer
-from src.core.tools import RectSelectTool, LassoTool, BucketTool, PickerTool, SmudgeTool, TextTool, ClipboardUtils
+from src.core.tools import RectSelectTool, LassoTool, BucketTool, PickerTool, SmudgeTool, TextTool, ClipboardUtils, MagicWandTool
 from src.core.processor import ImageProcessor
 from src.gui.dialogs import GradientMapDialog, AdjustmentDialog
 import os
@@ -51,8 +51,10 @@ class GLCanvas(QOpenGLWidget):
         self._stroke_start_image = None
         
         self.selection_path = QPainterPath()
+        self.selection_feather_mask = None  # numpy H×W uint8 gradient mask (for feathered selections)
         
         self.active_tool = None
+        self._tool_switched_callback = None  # callback for tool auto-switch notification
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
 
@@ -72,12 +74,20 @@ class GLCanvas(QOpenGLWidget):
         
         self.setCursor(Qt.CursorShape.ArrowCursor)
         
+        # Clear selection when switching away from selection tools
+        # (selection is only kept when switching between Rect Select / Lasso)
+        selection_tools = {"Rect Select", "Lasso"}
+        if tool_name not in selection_tools:
+            self.selection_path = QPainterPath()
+            self.selection_feather_mask = None
+        
         if tool_name == "Rect Select": self.active_tool = RectSelectTool(self)
         elif tool_name == "Lasso": self.active_tool = LassoTool(self)
         elif tool_name == "Fill Select": self.active_tool = BucketTool(self)
         elif tool_name == "Picker": self.active_tool = PickerTool(self)
         elif tool_name == "Smudge": self.active_tool = SmudgeTool(self)
         elif tool_name == "Text": self.active_tool = TextTool(self)
+        elif tool_name == "Magic Wand": self.active_tool = MagicWandTool(self)
         
         if self.active_tool:
             self.active_tool.activate()
@@ -179,11 +189,12 @@ class GLCanvas(QOpenGLWidget):
                 self.active_tool.draw_overlay(painter)
                 painter.restore()
         else:
+            # No active tool (e.g. brush mode) – draw only basic dashed border, no handles
             painter.translate(self.offset)
             painter.scale(self.zoom, self.zoom)
             if not self.selection_path.isEmpty():
-                from PyQt6.QtGui import QPen
-                pen = QPen(Qt.GlobalColor.white, 1, Qt.PenStyle.DashLine)
+                from PyQt6.QtGui import QPen as _Pen
+                pen = _Pen(Qt.GlobalColor.white, 1, Qt.PenStyle.DashLine)
                 pen.setCosmetic(True)
                 painter.setPen(pen)
                 painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -305,8 +316,11 @@ class GLCanvas(QOpenGLWidget):
                     mask = ClipboardUtils.get_selection_mask(self)
                     if mask:
                         old_img = self.active_layer.get_image()
-                        transparent = Image.new("RGBA", old_img.size, (0,0,0,0))
-                        new_img = Image.composite(transparent, old_img, mask)
+                        # Alpha-weighted removal for feathered masks
+                        mask_arr = np.array(mask, dtype=np.float32) / 255.0
+                        img_arr = np.array(old_img, dtype=np.float32)
+                        img_arr[..., 3] *= (1.0 - mask_arr)
+                        new_img = Image.fromarray(img_arr.clip(0, 255).astype(np.uint8), "RGBA")
                         
                         cmd = PaintCommand(self.active_layer, old_img, new_img)
                         self.undo_stack.push(cmd)
@@ -314,11 +328,23 @@ class GLCanvas(QOpenGLWidget):
                         self.update()
             return
 
+        # Magic Wand: Enter applies selection, Ctrl+Z undoes last point
+        if self.active_tool and isinstance(self.active_tool, MagicWandTool):
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.active_tool.apply_as_selection(feather=self.active_tool.feather)
+                self.update()
+                return
+            elif ctrl and event.key() == Qt.Key.Key_Z:
+                self.active_tool.undo_last_point()
+                self.update()
+                return
+
         if event.key() == Qt.Key.Key_Escape:
             if self.active_tool and hasattr(self.active_tool, 'deactivate'):
                 self.active_tool.deactivate()
             if not self.active_tool:
                 self.selection_path = QPainterPath()
+                self.selection_feather_mask = None
             self.update()
             
         elif ctrl and event.key() == Qt.Key.Key_Z:
@@ -642,7 +668,10 @@ class GLCanvas(QOpenGLWidget):
         if self.active_tool:
             self.active_tool.deactivate()
             self.active_tool = None
-            self.update()
+        # Switching to a brush means the user wants to paint — clear selection entirely
+        self.selection_path = QPainterPath()
+        self.selection_feather_mask = None
+        self.update()
 
     def _update_brush_texture(self):
         if not self.current_brush: return

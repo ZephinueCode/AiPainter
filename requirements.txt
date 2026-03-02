@@ -6,3 +6,8 @@ openai
 psd-tools
 sortedcontainers
 dashscope
+pytoshop
+six
+packbits
+replicate
+ultralytics

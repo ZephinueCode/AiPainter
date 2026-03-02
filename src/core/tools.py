@@ -1,7 +1,7 @@
 # src/core/tools.py
 
 from PyQt6.QtCore import Qt, QPoint, QRect, QPointF, QBuffer, QIODevice, QRectF
-from PyQt6.QtGui import QPainter, QPen, QColor, QPainterPath, QCursor, QFont, QImage, QTransform, QPolygonF
+from PyQt6.QtGui import QPainter, QPen, QColor, QPainterPath, QCursor, QFont, QImage, QTransform, QPolygonF, QBrush
 from PyQt6.QtWidgets import QMenu, QInputDialog, QDialog, QVBoxLayout, QSlider, QLabel, QDialogButtonBox, QApplication, QMessageBox
 from src.core.logic import PaintLayer, TextLayer, PaintCommand, GroupLayer
 from src.core.processor import ImageProcessor
@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw, ImageFilter  # Added ImageFilter
 import numpy as np
 from OpenGL.GL import glReadPixels, GL_RGB, GL_FLOAT
 import io
+import os
 import math
 
 # === Clipboard Utils ===
@@ -18,6 +19,11 @@ class ClipboardUtils:
         if not hasattr(canvas, 'selection_path') or canvas.selection_path.isEmpty():
             return None
         
+        # If a feathered gradient mask is stored, use it directly
+        if hasattr(canvas, 'selection_feather_mask') and canvas.selection_feather_mask is not None:
+            mask_arr = canvas.selection_feather_mask
+            return Image.fromarray(mask_arr, mode="L")
+
         w, h = canvas.doc_width, canvas.doc_height
         qimg = QImage(w, h, QImage.Format.Format_Grayscale8)
         qimg.fill(0)
@@ -45,8 +51,12 @@ class ClipboardUtils:
         
         mask = ClipboardUtils.get_selection_mask(canvas)
         if mask:
-            res = Image.new("RGBA", img.size, (0,0,0,0))
-            res.paste(img, (0,0), mask)
+            # Alpha-weighted extraction for feathered masks
+            mask_arr = np.array(mask, dtype=np.float32) / 255.0
+            img_arr = np.array(img, dtype=np.float32)
+            res_arr = img_arr.copy()
+            res_arr[..., 3] *= mask_arr
+            res = Image.fromarray(res_arr.clip(0, 255).astype(np.uint8), "RGBA")
             bbox = mask.getbbox()
             if bbox: res = res.crop(bbox)
             img = res
@@ -71,8 +81,11 @@ class ClipboardUtils:
         old_img = canvas.active_layer.get_image()
         
         if mask:
-            transparent = Image.new("RGBA", old_img.size, (0,0,0,0))
-            new_img = Image.composite(transparent, old_img, mask)
+            # Use alpha-weighted removal so feathered masks blend correctly
+            mask_arr = np.array(mask, dtype=np.float32) / 255.0
+            img_arr = np.array(old_img, dtype=np.float32)
+            img_arr[..., 3] *= (1.0 - mask_arr)
+            new_img = Image.fromarray(img_arr.clip(0, 255).astype(np.uint8), "RGBA")
         else:
             new_img = Image.new("RGBA", old_img.size, (0,0,0,0))
         
@@ -149,8 +162,9 @@ class Tool:
     def mouse_release(self, event, pos, layer_pos): pass
     
     def draw_overlay(self, painter):
-        if hasattr(self.canvas, 'selection_path') and not self.canvas.selection_path.isEmpty():
-            self._draw_selection_border(painter)
+        """Base tool: do NOT draw selection border/handles.
+        Only SelectionTool subclasses should draw selection visuals."""
+        pass
 
     def _draw_selection_border(self, painter):
         pen = QPen(Qt.GlobalColor.white, 1, Qt.PenStyle.DashLine)
@@ -203,6 +217,8 @@ class SelectionTool(Tool):
     def clear_selection(self):
         self.commit_transform()
         self.selection_path = QPainterPath()
+        if hasattr(self.canvas, 'selection_feather_mask'):
+            self.canvas.selection_feather_mask = None
         self.state = self.STATE_IDLE
         self.canvas.update()
 
@@ -246,14 +262,28 @@ class SelectionTool(Tool):
         crop = (int(bbox.left()), int(bbox.top()), int(bbox.right()), int(bbox.bottom()))
         self.floating_items = []
         
+        # Convert mask to numpy float for precise alpha-weighted separation
+        mask_arr = np.array(mask, dtype=np.float32) / 255.0  # 0.0 ~ 1.0
+        
         for layer in targets:
             try:
-                img = layer.get_image()
-                snapshot = img.copy() 
+                img = layer.get_image()  # PIL RGBA
+                snapshot = img.copy()
                 
-                temp = Image.new("RGBA", img.size, (0,0,0,0))
-                temp.paste(img, (0,0), mask)
-                floating = temp.crop(crop)
+                img_arr = np.array(img, dtype=np.float32)  # H x W x 4
+                
+                # Floating = original * mask_alpha (the lifted portion)
+                float_arr = img_arr.copy()
+                float_arr[..., 3] *= mask_arr  # modulate alpha by mask
+                
+                # Remaining = original * (1 - mask_alpha) (stays on the layer)
+                remain_arr = img_arr.copy()
+                remain_arr[..., 3] *= (1.0 - mask_arr)
+                
+                floating_img = Image.fromarray(float_arr.clip(0, 255).astype(np.uint8), "RGBA")
+                remaining_img = Image.fromarray(remain_arr.clip(0, 255).astype(np.uint8), "RGBA")
+                
+                floating = floating_img.crop(crop)
                 
                 if floating.getbbox() is None: continue
 
@@ -261,9 +291,7 @@ class SelectionTool(Tool):
                 floating.save(bio, "PNG")
                 qimg = QImage.fromData(bio.getvalue())
                 
-                clear_temp = Image.new("RGBA", img.size, (0,0,0,0))
-                cleared = Image.composite(clear_temp, img, mask)
-                layer.load_from_image(cleared)
+                layer.load_from_image(remaining_img)
                 
                 self.floating_items.append({
                     'layer': layer,
@@ -336,19 +364,38 @@ class SelectionTool(Tool):
         if not self.has_selection(): return {}
         if self.state == self.STATE_CREATING: return {}
         
-        t = self._get_current_transform()
-        path = t.map(self.base_path) if self.floating_items or self.transform_mode else self.selection_path
-            
-        bbox = path.boundingRect()
         s = self.handle_size / self.canvas.zoom
-        
-        tl = bbox.topLeft(); tr = bbox.topRight()
-        bl = bbox.bottomLeft(); br = bbox.bottomRight()
-        rot = QPointF(bbox.center().x(), bbox.top() - 30/self.canvas.zoom)
-        
+
+        # When we have a floating transform, compute the actual rotated corners
+        if self.floating_items or self.transform_mode:
+            t = self._get_current_transform()
+            bbox = self.base_path.boundingRect()
+            # Map the original (unrotated) corners through the transform
+            tl = t.map(bbox.topLeft())
+            tr = t.map(bbox.topRight())
+            bl = t.map(bbox.bottomLeft())
+            br = t.map(bbox.bottomRight())
+            center_top = t.map(QPointF(bbox.center().x(), bbox.top()))
+            rot_pt = center_top + (center_top - t.map(QPointF(bbox.center().x(), bbox.center().y())))
+            # Normalise rotation handle distance
+            diff = center_top - t.map(bbox.center())
+            length = math.sqrt(diff.x()**2 + diff.y()**2)
+            if length > 0:
+                rot_pt = center_top + diff * (30 / self.canvas.zoom / length)
+            else:
+                rot_pt = QPointF(center_top.x(), center_top.y() - 30/self.canvas.zoom)
+        else:
+            # No transform yet – use the selection_path's bounding rect
+            bbox = self.selection_path.boundingRect()
+            tl = bbox.topLeft()
+            tr = bbox.topRight()
+            bl = bbox.bottomLeft()
+            br = bbox.bottomRight()
+            rot_pt = QPointF(bbox.center().x(), bbox.top() - 30/self.canvas.zoom)
+
         def r(pt): return QRectF(pt.x()-s/2, pt.y()-s/2, s, s)
         
-        return {'tl': r(tl), 'tr': r(tr), 'bl': r(bl), 'br': r(br), 'rot': r(rot), 'move': bbox}
+        return {'tl': r(tl), 'tr': r(tr), 'bl': r(bl), 'br': r(br), 'rot': r(rot_pt), 'move': self.selection_path.boundingRect()}
 
     def _hit_test(self, pos):
         if not self.has_selection(): return None
@@ -364,6 +411,8 @@ class SelectionTool(Tool):
     def start_creating(self, pos):
         self.commit_transform()
         self.selection_path = QPainterPath()
+        if hasattr(self.canvas, 'selection_feather_mask'):
+            self.canvas.selection_feather_mask = None
         self.state = self.STATE_CREATING
         self.start_mouse_pos = pos
 
@@ -404,10 +453,16 @@ class SelectionTool(Tool):
     def mouse_move(self, event, pos, layer_pos):
         if self.state == self.STATE_IDLE and self.has_selection():
             hit = self._hit_test(layer_pos)
-            if hit == 'move': self.canvas.setCursor(Qt.CursorShape.OpenHandCursor)
-            elif hit == 'rot': self.canvas.setCursor(Qt.CursorShape.PointingHandCursor)
-            elif hit: self.canvas.setCursor(Qt.CursorShape.SizeFDiagCursor)
-            else: self.canvas.setCursor(Qt.CursorShape.CrossCursor)
+            if hit == 'move':
+                self.canvas.setCursor(Qt.CursorShape.OpenHandCursor)
+            elif hit == 'rot':
+                self.canvas.setCursor(Qt.CursorShape.PointingHandCursor)
+            elif hit in ('tl', 'br'):
+                self.canvas.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            elif hit in ('tr', 'bl'):
+                self.canvas.setCursor(Qt.CursorShape.SizeBDiagCursor)
+            else:
+                self.canvas.setCursor(Qt.CursorShape.CrossCursor)
         elif self.state == self.STATE_CREATING:
             self.update_creating(layer_pos)
         elif self.state == self.STATE_TRANSFORMING:
@@ -416,6 +471,7 @@ class SelectionTool(Tool):
     def mouse_release(self, event, pos, layer_pos):
         if self.state == self.STATE_CREATING:
             self.finish_creating()
+            self.canvas.update()  # repaint to show handles immediately
         elif self.state == self.STATE_TRANSFORMING:
             self.state = self.STATE_IDLE
             self.transform_mode = None
@@ -456,10 +512,14 @@ class SelectionTool(Tool):
             
         if self.has_selection():
             self._draw_selection_border(painter)
-            if self.state == self.STATE_IDLE:
+            # Always show handles when a selection exists (except while creating)
+            if self.state != self.STATE_CREATING:
                 handles = self._get_handles()
+                handle_pen = QPen(QColor(0, 0, 0), max(1.0, 1.0 / self.canvas.zoom))
+                handle_pen.setCosmetic(False)
                 for k, r in handles.items():
                     if k == 'move': continue
+                    painter.setPen(handle_pen)
                     if k == 'rot':
                         painter.setBrush(QColor(100, 200, 255))
                         painter.drawEllipse(r)
@@ -667,3 +727,408 @@ class AdjustmentDialog(QDialog):
         args = [s["w"].value()*s["s"] for s in self.sliders]
         self.preview_layer.load_from_image(self.func(self.original_img, *args)); self.parent().update()
     def reject(self): self.preview_layer.load_from_image(self.original_img); self.parent().update(); super().reject()
+
+
+# === AI Magic Wand Tool (MobileSAM) ===
+class MagicWandTool(Tool):
+    """
+    AI Magic Wand tool – powered by MobileSAM.
+    Generates a selection mask in real-time via multi-point input.
+    
+    Interaction:
+      - Left click : add positive point (include region)
+      - Right click: add negative point (exclude region)
+      - Ctrl+Z     : undo last point
+      - Enter      : apply current mask as selection
+      - Escape     : cancel
+    """
+
+    def __init__(self, canvas):
+        super().__init__(canvas)
+        self.cursor = Qt.CursorShape.CrossCursor
+
+        # Point data – stored in layer pixel coordinates
+        self._points = []       # [[x, y], ...]
+        self._labels = []       # [1, 0, ...]  1=positive 0=negative
+        self._point_mode = 1    # Current default mode: 1=positive
+
+        # Feather radius (set by the panel's slider)
+        self.feather = 0
+
+        # Mask
+        self._current_mask = None   # numpy H×W uint8 (0 or 255)
+
+        # Inference
+        self._inference_thread = None
+        self._is_inferring = False
+
+        # Temp image file (passed to MobileSAM)
+        self._temp_image_path = None
+
+        # Service reference
+        from src.agent.mobile_sam_service import MobileSAMService
+        self._sam = MobileSAMService.instance()
+
+        # Status callback (set by the panel)
+        self._status_callback = None
+
+    # ── Lifecycle ────────────────────────────────────
+
+    def activate(self):
+        super().activate()
+        self._clear_all()
+
+        # Ensure model is loaded
+        if not self._sam.is_loaded:
+            self._sam.model_loading_msg.connect(self._on_model_msg)
+            self._sam.model_load_finished.connect(self._on_model_loaded)
+            self._sam.load_model_async()
+
+    def deactivate(self):
+        self._cleanup_temp()
+        self._disconnect_sam_signals()
+        super().deactivate()
+
+    def _disconnect_sam_signals(self):
+        try: self._sam.model_loading_msg.disconnect(self._on_model_msg)
+        except TypeError: pass
+        try: self._sam.model_load_finished.disconnect(self._on_model_loaded)
+        except TypeError: pass
+
+    # ── Model Load Callbacks ────────────────────────────
+
+    def _on_model_msg(self, msg):
+        if self._status_callback:
+            self._status_callback(msg)
+
+    def _on_model_loaded(self, success, msg):
+        if self._status_callback:
+            self._status_callback(msg if success else f"⚠️ {msg}")
+
+    # ── Mouse Events ───────────────────────────────────
+
+    def mouse_press(self, event, pos, layer_pos):
+        if not self._sam.is_loaded or self._is_inferring:
+            return
+
+        layer = self.canvas.active_layer
+        if not layer or layer.__class__.__name__ == 'GroupLayer':
+            return
+
+        # layer_pos is already in canvas (= layer) coordinates (no layer offset in this project)
+        lx, ly = int(layer_pos.x()), int(layer_pos.y())
+
+        # Bounds check
+        if lx < 0 or ly < 0 or lx >= layer.width or ly >= layer.height:
+            return
+
+        # Left click → current mode; Right click → always negative
+        if event.button() == Qt.MouseButton.LeftButton:
+            label = self._point_mode
+        elif event.button() == Qt.MouseButton.RightButton:
+            label = 0
+        else:
+            return
+
+        self._points.append([lx, ly])
+        self._labels.append(label)
+
+        # Ensure temp image exists
+        self._ensure_temp_image(layer)
+
+        # Update panel info
+        self._notify_panel()
+
+        # Run inference
+        self._run_inference()
+
+        self.canvas.update()
+
+    def mouse_move(self, event, pos, layer_pos):
+        pass  # Not needed for now
+
+    def mouse_release(self, event, pos, layer_pos):
+        pass
+
+    # ── Keyboard Events (forwarded by GLCanvas.keyPressEvent) ──
+
+    # GLCanvas does not forward keyPress to tools generically, so
+    # keyboard shortcuts (Enter, Ctrl+Z) are handled directly in
+    # canvas.keyPressEvent via isinstance check. Escape is handled
+    # natively by the canvas (calls tool.deactivate).
+
+    # ── Inference ────────────────────────────────────────
+
+    def _ensure_temp_image(self, layer):
+        """Export the active layer's current pixels to a temp PNG.
+        Recreates when starting a new point session (first point) or when
+        the cached file is missing, to ensure it reflects the latest layer state.
+        """
+        # Reuse existing temp if we already have points in this session
+        if self._temp_image_path and os.path.exists(self._temp_image_path) and len(self._points) > 1:
+            return
+
+        # Clean up previous temp file if any
+        self._cleanup_temp()
+
+        self.canvas.makeCurrent()
+        pil_img = layer.get_image()  # PIL RGBA – reads current FBO state
+
+        # Flatten to RGB on white background for better SAM results
+        if pil_img.mode == 'RGBA':
+            bg = Image.new("RGB", pil_img.size, (255, 255, 255))
+            bg.paste(pil_img, mask=pil_img.split()[3])
+            pil_img = bg
+
+        from src.agent.mobile_sam_service import MobileSAMService
+        self._temp_image_path = MobileSAMService.pil_to_temp_png(pil_img)
+
+    def _cleanup_temp(self):
+        if self._temp_image_path and os.path.exists(self._temp_image_path):
+            try: os.remove(self._temp_image_path)
+            except: pass
+        self._temp_image_path = None
+
+    def _run_inference(self):
+        if not self._points or self._is_inferring or not self._temp_image_path:
+            return
+
+        self._is_inferring = True
+        if self._status_callback:
+            self._status_callback("Generating mask...")
+
+        thread = self._sam.create_inference_thread(
+            self._temp_image_path,
+            self._points,
+            self._labels
+        )
+        if thread is None:
+            self._is_inferring = False
+            return
+
+        self._inference_thread = thread
+        thread.result_ready.connect(self._on_inference_done)
+        thread.error_occurred.connect(self._on_inference_error)
+        thread.start()
+
+    def _on_inference_done(self, mask):
+        self._is_inferring = False
+        if mask is not None:
+            self._current_mask = mask
+        if self._status_callback:
+            self._status_callback("Mask updated — Enter to apply / Esc to cancel")
+        self.canvas.update()
+
+    def _on_inference_error(self, msg):
+        self._is_inferring = False
+        if self._status_callback:
+            self._status_callback(f"⚠️ Inference failed: {msg}")
+
+    # ── Public Operations (called by the panel) ────────
+
+    def set_point_mode(self, mode):
+        """Switch point mode: 1=positive, 0=negative."""
+        self._point_mode = mode
+
+    def undo_last_point(self):
+        """Undo the last point."""
+        if not self._points:
+            return
+        self._points.pop()
+        self._labels.pop()
+        self._notify_panel()
+        if self._points:
+            self._run_inference()
+        else:
+            self._current_mask = None
+            self.canvas.update()
+
+    def clear_all_points(self):
+        """Clear all points."""
+        self._clear_all()
+        self.canvas.update()
+
+    def apply_as_selection(self, feather=0):
+        """Convert the current mask to a selection path and apply it.
+        
+        Args:
+            feather: Blur/erode radius. Positive = expand/soften edges,
+                     negative = shrink/erode edges. 0 = sharp.
+        """
+        if self._current_mask is None:
+            return
+
+        import cv2
+
+        # Use the feather parameter (from panel) or fall back to self.feather
+        old_feather = self.feather
+        self.feather = feather
+        mask = self._get_feathered_mask()
+        self.feather = old_feather
+
+        if mask is None or not (mask > 1).any():
+            return
+
+        # Use a low threshold so the contour captures the full feathered extent.
+        # Any pixel with value > 1 is considered part of the selection boundary.
+        _, binary = cv2.threshold(mask, 1, 255, cv2.THRESH_BINARY)
+
+        # Find contours → build a smooth QPainterPath (no ugly QRegion rectangles)
+        contours, hierarchy = cv2.findContours(
+            binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        if not contours:
+            return
+
+        path = QPainterPath()
+        # hierarchy[0][i] = [next, prev, first_child, parent]
+        # Outer contours (parent == -1) are added, holes (parent >= 0) are subtracted.
+        for i, cnt in enumerate(contours):
+            if len(cnt) < 3:
+                continue
+            sub = QPainterPath()
+            pts = cnt.squeeze()
+            if pts.ndim != 2:
+                continue
+            sub.moveTo(float(pts[0][0]), float(pts[0][1]))
+            for px, py in pts[1:]:
+                sub.lineTo(float(px), float(py))
+            sub.closeSubpath()
+
+            if hierarchy is not None and hierarchy[0][i][3] == -1:
+                path = path.united(sub)   # outer contour
+            else:
+                path = path.subtracted(sub)  # hole
+
+        if path.isEmpty():
+            return
+
+        # Store the feathered gradient mask on the canvas for operations (copy/cut/lift)
+        if hasattr(self.canvas, 'selection_feather_mask'):
+            self.canvas.selection_feather_mask = mask if feather != 0 else None
+
+        # Set as canvas selection
+        self.canvas.selection_path = path
+
+        # Clean up tool state
+        self._clear_all()
+
+        # Auto-switch to Rect Select so the user can transform immediately
+        self.canvas.set_tool("Rect Select")
+        # Notify any connected panel about the tool change
+        if hasattr(self.canvas, '_tool_switched_callback') and self.canvas._tool_switched_callback:
+            self.canvas._tool_switched_callback("Rect Select")
+        self.canvas.update()
+
+    # ── Internal Methods ────────────────────────────────
+
+    def _clear_all(self):
+        self._points.clear()
+        self._labels.clear()
+        self._current_mask = None
+        self._cleanup_temp()
+        self._notify_panel()
+
+    def _notify_panel(self):
+        """Notify the panel to update point counts (panel calls get_point_counts)."""
+        pass
+
+    def get_point_counts(self):
+        pos = self._labels.count(1)
+        neg = self._labels.count(0)
+        return pos, neg
+
+    def _get_feathered_mask(self):
+        """Apply current feather value to the raw mask and return the result.
+        
+        Positive feather = expand outward with soft edge.
+        Negative feather = shrink inward with soft edge.
+        Returns None if no mask available.
+        """
+        if self._current_mask is None:
+            return None
+        import cv2
+        raw = self._current_mask  # H x W uint8 (0 or 255)
+        f = self.feather
+        if f == 0:
+            return raw.copy()
+
+        af = abs(f)
+        ksize = af * 2 + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ksize, ksize))
+
+        if f > 0:
+            # Expand outward: dilate to get new outer boundary, then blur for softness
+            dilated = cv2.dilate(raw, kernel, iterations=1)
+            blurred = cv2.GaussianBlur(dilated, (ksize, ksize), 0)
+            # Keep the original interior at full 255, soft-blend only the expanded zone
+            result = np.maximum(raw, blurred)
+        else:
+            # Shrink inward: erode to get new inner boundary, then blur for softness
+            eroded = cv2.erode(raw, kernel, iterations=1)
+            blurred = cv2.GaussianBlur(eroded, (ksize, ksize), 0)
+            # Clamp to original mask so we don't expand beyond original boundary
+            result = np.minimum(raw, blurred)
+
+        return result
+
+    # ── Overlay Drawing ───────────────────────────────
+
+    def draw_overlay(self, painter):
+        """Draw mask preview and point markers on the canvas."""
+        # Draw default selection dashes first (if any)
+        super().draw_overlay(painter)
+
+        layer = self.canvas.active_layer
+        if not layer:
+            return
+
+        # ── Draw semi-transparent mask overlay (with feather applied) ──
+        display_mask = self._get_feathered_mask()
+        if display_mask is not None:
+            h, w = display_mask.shape
+            # Build RGBA overlay – alpha proportional to mask intensity
+            rgba = np.zeros((h, w, 4), dtype=np.uint8)
+            rgba[..., 0] = 60    # R
+            rgba[..., 1] = 140   # G
+            rgba[..., 2] = 255   # B
+            # Scale alpha by mask value (0-255) → visible feather gradient
+            rgba[..., 3] = (display_mask.astype(np.float32) * (90.0 / 255.0)).astype(np.uint8)
+
+            overlay_img = QImage(rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
+            painter.save()
+            painter.setOpacity(0.8)
+            painter.drawImage(0, 0, overlay_img)
+            painter.setOpacity(1.0)
+            painter.restore()
+
+        # ── Draw point markers ──
+        zoom = self.canvas.zoom
+        for i, (pt, lbl) in enumerate(zip(self._points, self._labels)):
+            x, y = pt
+            if lbl == 1:
+                outer = QColor(0, 200, 0, 200)
+                inner = QColor(0, 255, 0, 255)
+            else:
+                outer = QColor(200, 0, 0, 200)
+                inner = QColor(255, 0, 0, 255)
+
+            r_outer = max(5.0, 6.0 / zoom)
+            r_inner = max(2.5, 3.0 / zoom)
+
+            pen_w = max(1.0, 1.5 / zoom)
+            painter.setPen(QPen(Qt.GlobalColor.white, pen_w))
+            painter.setBrush(QBrush(outer))
+            painter.drawEllipse(QPointF(x, y), r_outer, r_outer)
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(inner))
+            painter.drawEllipse(QPointF(x, y), r_inner, r_inner)
+
+        # ── Inference-in-progress indicator ──
+        if self._is_inferring:
+            painter.resetTransform()
+            painter.setPen(QColor(255, 200, 50))
+            painter.setFont(QFont("Arial", 11))
+            painter.drawText(20, 30, "Generating AI mask...")

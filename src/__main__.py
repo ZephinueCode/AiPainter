@@ -2,6 +2,16 @@
 
 import sys
 import os
+
+# Pre-import torch before any PyQt6/OpenGL imports.
+# On Windows, Qt's OpenGL initialization changes the DLL loader state,
+# which prevents torch's c10.dll from initializing (WinError 1114).
+# Importing torch first ensures c10.dll is loaded while the DLL state is clean.
+try:
+    import torch  # noqa: F401
+except ImportError:
+    pass
+
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QDockWidget, QFileDialog, QMessageBox)
 from PyQt6.QtCore import Qt, QPoint
 from PyQt6.QtGui import QAction, QPalette, QColor, QFont, QImage
@@ -203,7 +213,8 @@ class MainWindow(QMainWindow):
         self.left_sidebar = LeftSidebar(
             self.brush_manager, 
             self.canvas.set_brush, 
-            self.canvas.set_tool
+            self.canvas.set_tool,
+            self.canvas
         )
         
         # Hook up the AI button manually
