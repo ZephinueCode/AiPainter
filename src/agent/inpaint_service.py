@@ -92,7 +92,7 @@ class WanxInpaintThread(QThread):
 
             rsp = ImageSynthesis.call(
                 api_key=manager.api_key,
-                model="wanx2.1-imageedit",
+                model=manager.inpaint_model,
                 function="description_edit_with_mask",
                 prompt=self._prompt,
                 mask_image_url=mask_url,
@@ -226,7 +226,7 @@ class QwenEditThread(QThread):
 
             response = MultiModalConversation.call(
                 api_key=manager.api_key,
-                model="qwen-image-2.0",
+                model=manager.edit_model,
                 messages=messages,
                 stream=False,
                 n=1,

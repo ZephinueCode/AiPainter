@@ -444,8 +444,8 @@ class GLCanvas(QOpenGLWidget):
         act_paste.setEnabled(can_paste)
         
         menu.addSeparator()
-        menu.addAction("✨ AI Generate Layered (Test)", self.test_trigger_ai)#for test
-        act_qwen = menu.addAction("✨ Edit With Qwen-Imageedit", self.start_qwen_edit)
+        menu.addAction("(AI) Multi-Layer Gen (Experimental)", self.test_trigger_ai) #for test
+        act_qwen = menu.addAction("(AI) Edit Layer", self.start_qwen_edit)
         act_qwen.setEnabled(self.active_layer is not None and isinstance(self.active_layer, PaintLayer))
         menu.addSeparator()
         menu.addAction("HSL Adjustment", lambda: self.open_adjustment("HSL"))
@@ -459,12 +459,12 @@ class GLCanvas(QOpenGLWidget):
     def test_trigger_ai(self):
         """一键拆分当前图层工作流"""
         if not self.active_layer or not isinstance(self.active_layer, PaintLayer):
-            QMessageBox.warning(self, "AI 提示", "请先选中一个绘图图层。")
+            QMessageBox.warning(self, "AI Tip", "Select a layer first.")
             return
 
         # 1. 弹窗询问 (可选)
         from PyQt6.QtWidgets import QInputDialog
-        text, ok = QInputDialog.getText(self, "Qwen Layered AI", "输入描述 (或直接点击确定进行拆分):")
+        text, ok = QInputDialog.getText(self, "Qwen Layered AI", "Input prompt (or leave blank to partition)......")
         if not ok: return
 
         # 2. 提取当前图层作为 AI 输入
@@ -478,7 +478,7 @@ class GLCanvas(QOpenGLWidget):
         self.current_generator.layered_generation_finished.connect(self.handle_layered_generation)
 
         # 4. 开始推理
-        print("AI 正在解析图层，请稍候...")
+        print("AI Parsing...")
         self.current_generator.generate_layered(prompt=text, input_image=input_pil, num_layers=4)
 
     def handle_layered_generation(self, images, names, error_msg):
@@ -487,13 +487,13 @@ class GLCanvas(QOpenGLWidget):
         """
         if error_msg:
             from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "生成失败", error_msg)
+            QMessageBox.warning(self, "Generation Failed", error_msg)
             return
 
         if not images:
             return
 
-        print(f"收到 {len(images)} 个图层，正在导入工作流...")
+        print(f"Received {len(images)} layers, inserting......")
 
         # --- 核心步骤 ---
         
@@ -523,11 +523,11 @@ class GLCanvas(QOpenGLWidget):
             self.view_changed.emit()            # 触发画布重绘
             self.update()                       # 强制 QOpenGLWidget 刷新
             
-            print("分层图像已成功插入工作流。")
+            print("Layered Image Inserted.")
 
         except Exception as e:
             from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.critical(self, "导入错误", f"处理 AI 图层时出错: {str(e)}")
+            QMessageBox.critical(self, "Insert Failure", f"Error Processing AI Layers: {str(e)}")
 
     # ── Inpaint / Image-Edit ─────────────────────────────
 
@@ -995,10 +995,10 @@ class GLCanvas(QOpenGLWidget):
         glEnable(GL_BLEND) 
         glEnable(GL_TEXTURE_2D)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        print("开始渲染导出...")
+        print("Rendering...")
         def debug_nodes(node):
             if isinstance(node, PaintLayer):
-                print(f"正在渲染层: {node.name}, 纹理ID: {node.texture}, 可见性: {node.visible}")
+                print(f"Rendering: {node.name}, Texture ID: {node.texture}, Visibility: {node.visible}")
             if hasattr(node, 'children'):
                 for c in node.children: debug_nodes(c)
         debug_nodes(self.root)
@@ -1007,6 +1007,54 @@ class GLCanvas(QOpenGLWidget):
         Image.frombytes("RGBA", (self.doc_width, self.doc_height), data).transpose(Image.FLIP_TOP_BOTTOM).save(path)
         glDeleteFramebuffers(1, [fbo]); glDeleteTextures([tex]); glBindFramebuffer(GL_FRAMEBUFFER, 0)
 
+    def _read_layer_rgba(self, node):
+        """
+        Robustly read a PaintLayer RGBA image from GPU.
+        Priority: texture read -> FBO read fallback.
+        Returns a PIL.Image in RGBA, top-left origin.
+        """
+        expected = node.width * node.height * 4
+        raw = None
+
+        self.makeCurrent()
+        glPixelStorei(GL_PACK_ALIGNMENT, 1)
+        glFinish()  # ensure all pending draws completed
+
+        # --- Try texture read first ---
+        try:
+            glBindTexture(GL_TEXTURE_2D, node.texture)
+            # Keep to base level only (avoid mip confusion on some drivers)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0)
+
+            raw = glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE)
+            if raw is not None and len(raw) != expected:
+                raw = None
+        except Exception:
+            raw = None
+
+        # --- Fallback: read from layer FBO ---
+        if raw is None:
+            try:
+                glBindFramebuffer(GL_FRAMEBUFFER, node.fbo)
+                raw = glReadPixels(0, 0, node.width, node.height, GL_RGBA, GL_UNSIGNED_BYTE)
+                glBindFramebuffer(GL_FRAMEBUFFER, 0)
+                if raw is not None and len(raw) != expected:
+                    raw = None
+            except Exception:
+                raw = None
+                glBindFramebuffer(GL_FRAMEBUFFER, 0)
+
+        # --- Last fallback: transparent ---
+        if raw is None:
+            raw = b'\x00' * expected
+
+        img = Image.frombytes("RGBA", (node.width, node.height), raw)
+        # OpenGL origin is bottom-left; convert to top-left
+        img = img.transpose(Image.FLIP_TOP_BOTTOM)
+        return img
+
+
     def export_to_psd(self, path):
         """Export layer tree to PSD with group support using raw binary writer."""
         self.makeCurrent()
@@ -1014,45 +1062,55 @@ class GLCanvas(QOpenGLWidget):
 
         doc_w, doc_h = self.doc_width, self.doc_height
 
-        # Collect layers in PSD order (bottom-to-top in the file = first-to-last in list)
-        # PSD groups use "sandwich" markers: </Layer group> ... layers ... <Group Start>
-        flat_layers = []  # list of dict with 'type': 'layer' | 'group_start' | 'group_end'
+        # flat_layers order should be PSD layer order context (you already handle markers in writer)
+        flat_layers = []  # entries: layer | group_start | group_end
 
         def collect_layers(node):
             if isinstance(node, PaintLayer):
-                glBindTexture(GL_TEXTURE_2D, node.texture)
-                raw = glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE)
-                img = Image.frombytes("RGBA", (node.width, node.height), raw)
-                img = img.transpose(Image.FLIP_TOP_BOTTOM)
+                img = self._read_layer_rgba(node)
+
+                # Normalize to document size
                 if img.size != (doc_w, doc_h):
                     canvas = Image.new("RGBA", (doc_w, doc_h), (0, 0, 0, 0))
                     canvas.paste(img, (0, 0))
                     img = canvas
+
                 flat_layers.append({
                     'type': 'layer',
-                    'name': node.name[:255],
+                    'name': (node.name or "Layer")[:255],
                     'image': img,
-                    'opacity': int(node.opacity * 255),
-                    'visible': node.visible,
+                    'opacity': int(max(0.0, min(1.0, node.opacity)) * 255),
+                    'visible': bool(node.visible),
                 })
+
             elif isinstance(node, GroupLayer) and node != self.root:
+                # PSD "sandwich": group_end ... children ... group_start
                 flat_layers.append({
                     'type': 'group_end',
-                    'name': node.name[:255],
-                    'opacity': int(node.opacity * 255),
-                    'visible': node.visible,
+                    'name': (node.name or "Group")[:255],
+                    'opacity': int(max(0.0, min(1.0, node.opacity)) * 255),
+                    'visible': bool(node.visible),
                 })
-                for child in reversed(node.children):      # ← 改为 reversed
+
+                # IMPORTANT: group-internal order should not be reversed again
+                for child in node.children:
                     collect_layers(child)
+
                 flat_layers.append({
                     'type': 'group_start',
-                    'name': node.name[:255],
-                    'opacity': int(node.opacity * 255),
-                    'visible': node.visible,
+                    'name': (node.name or "Group")[:255],
+                    'opacity': int(max(0.0, min(1.0, node.opacity)) * 255),
+                    'visible': bool(node.visible),
                 })
+
             elif node == self.root:
-                for child in reversed(node.children):       # ← 改为 reversed
+                # Root level: keep consistent with your tree storage.
+                # If exported stack becomes upside down, ONLY reverse here (not inside groups).
+                for child in reversed(node.children):
                     collect_layers(child)
+                # If needed instead:
+                # for child in reversed(node.children):
+                #     collect_layers(child)
 
         collect_layers(self.root)
 
@@ -1060,7 +1118,6 @@ class GLCanvas(QOpenGLWidget):
             print("No layers to export.")
             return
 
-        # Collect all real images for composite
         real_layers = [l for l in flat_layers if l['type'] == 'layer']
 
         try:
@@ -1248,11 +1305,12 @@ class CanvasWidget(QWidget):
 import struct
 
 def _pack_psd_string(s, padding=4):
-    """Encode a Pascal string with padding."""
-    b = s.encode('utf-8')[:255]
+    """Encode a Pascal string with padding (ASCII-safe for PSD compatibility)."""
+    # PSD Pascal strings must be ASCII-compatible
+    # Replace non-ASCII characters to avoid codec errors
+    b = s.encode('ascii', errors='replace')[:255]
     length = len(b)
     data = struct.pack('B', length) + b
-    # Pad to multiple of `padding`
     while len(data) % padding != 0:
         data += b'\x00'
     return data

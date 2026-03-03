@@ -204,30 +204,73 @@ class SettingsDialog(QDialog):
         self.tab_ui.setLayout(form_ui)
         
         self.tabs.addTab(self.tab_ui, "Interface")
-        
+
         # --- Tab 3: AI Settings ---
         self.tab_ai = QWidget()
         layout_ai = QVBoxLayout(self.tab_ai)
-        form_ai = QFormLayout()
         
+        # ── Connection Settings ──
+        conn_label = QLabel("Connection")
+        conn_label.setStyleSheet("font-weight: bold; font-size: 13px; margin-top: 5px;")
+        layout_ai.addWidget(conn_label)
+        
+        form_conn = QFormLayout()
         self.txt_base_url = QLineEdit(self.agent_manager.base_url)
         self.txt_api_key = QLineEdit(self.agent_manager.api_key)
         self.txt_api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.txt_model = QLineEdit(self.agent_manager.model)
         self.txt_proxy = QLineEdit(self.agent_manager.proxy)
         self.txt_proxy.setPlaceholderText("e.g. http://127.0.0.1:7890")
         
-        form_ai.addRow("Base URL:", self.txt_base_url)
-        form_ai.addRow("API Key:", self.txt_api_key)
-        form_ai.addRow("Model:", self.txt_model)
-        form_ai.addRow("Proxy (Optional):", self.txt_proxy)
-        layout_ai.addLayout(form_ai)
+        form_conn.addRow("Base URL:", self.txt_base_url)
+        form_conn.addRow("API Key:", self.txt_api_key)
+        form_conn.addRow("Proxy (Optional):", self.txt_proxy)
+        layout_ai.addLayout(form_conn)
         
         btn_test = QPushButton("Test Connection")
         btn_test.clicked.connect(self.test_ai_connection)
         layout_ai.addWidget(btn_test)
-        layout_ai.addStretch()
+
+        # ── Model Configuration ──
+        model_label = QLabel("Model Configuration")
+        model_label.setStyleSheet("font-weight: bold; font-size: 13px; margin-top: 15px;")
+        layout_ai.addWidget(model_label)
+
+        model_desc = QLabel("Configure the model used for each AI feature.\nLeave default if unsure.")
+        model_desc.setStyleSheet("color: #888; font-size: 10px;")
+        model_desc.setWordWrap(True)
+        layout_ai.addWidget(model_desc)
+
+        form_models = QFormLayout()
+
+        self.txt_generate_model = QLineEdit(self.agent_manager.generate_model)
+        self.txt_generate_model.setPlaceholderText("e.g. qwen-vl-max, wanx-v1")
+        form_models.addRow("Generate (Text→Image):", self.txt_generate_model)
+
+        self.txt_edit_model = QLineEdit(self.agent_manager.edit_model)
+        self.txt_edit_model.setPlaceholderText("e.g. qwen-image-2.0")
+        form_models.addRow("Edit (Image→Image):", self.txt_edit_model)
+
+        self.txt_inpaint_model = QLineEdit(self.agent_manager.inpaint_model)
+        self.txt_inpaint_model.setPlaceholderText("e.g. wanx2.1-imageedit")
+        form_models.addRow("Inpaint (Mask Edit):", self.txt_inpaint_model)
+
+        self.txt_layered_model = QLineEdit(self.agent_manager.layered_model)
+        self.txt_layered_model.setPlaceholderText("e.g. qwen/qwen-image-layered")
+        form_models.addRow("Layered (Replicate):", self.txt_layered_model)
         
+        self.txt_replicate_key = QLineEdit(self.agent_manager.replicate_api_key)
+        self.txt_replicate_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.txt_replicate_key.setPlaceholderText("Replicate API Token (r8_...)")
+        form_models.addRow("Replicate API Key:", self.txt_replicate_key)
+
+        layout_ai.addLayout(form_models)
+
+        btn_reset_models = QPushButton("Reset to Defaults")
+        btn_reset_models.setStyleSheet("color: #888;")
+        btn_reset_models.clicked.connect(self._reset_model_defaults)
+        layout_ai.addWidget(btn_reset_models)
+
+        layout_ai.addStretch()
         self.tabs.addTab(self.tab_ai, "AI Settings")
 
         # --- Tab 4: MobileSAM Model Management ---
@@ -300,12 +343,15 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "AI Connection Failed", msg)
 
     def accept(self):
-        # Save AI settings on OK
         self.agent_manager.save_config(
-            self.txt_base_url.text(),
-            self.txt_api_key.text(),
-            self.txt_model.text(),
-            self.txt_proxy.text()
+            base_url=self.txt_base_url.text(),
+            api_key=self.txt_api_key.text(),
+            model=self.txt_generate_model.text(),
+            proxy=self.txt_proxy.text(),
+            edit_model=self.txt_edit_model.text(),
+            inpaint_model=self.txt_inpaint_model.text(),
+            layered_model=self.txt_layered_model.text(),
+            replicate_api_key=self.txt_replicate_key.text(),
         )
         super().accept()
 
@@ -315,17 +361,17 @@ class SettingsDialog(QDialog):
             from src.agent.mobile_sam_service import MobileSAMService
             sam = MobileSAMService.instance()
             if sam.is_loaded:
-                self._sam_status_label.setText("✅ Loaded (ready in memory)")
+                self._sam_status_label.setText("Loaded (ready in memory)")
                 self._sam_status_label.setStyleSheet("color: green; font-weight: bold;")
             elif sam.is_model_downloaded():
-                self._sam_status_label.setText("📦 Downloaded (not loaded)")
+                self._sam_status_label.setText("Downloaded (not loaded)")
                 self._sam_status_label.setStyleSheet("color: #0066cc;")
             else:
-                self._sam_status_label.setText("❌ Not downloaded")
+                self._sam_status_label.setText("Not downloaded")
                 self._sam_status_label.setStyleSheet("color: #cc0000;")
             self._sam_size_label.setText(sam.get_model_size_str())
         except ImportError:
-            self._sam_status_label.setText("⚠️ ultralytics not installed")
+            self._sam_status_label.setText("ultralytics not installed")
             self._sam_status_label.setStyleSheet("color: #cc0000;")
             self._sam_size_label.setText("—")
 
@@ -388,6 +434,13 @@ class SettingsDialog(QDialog):
                     QMessageBox.warning(self, "MobileSAM", msg)
         except ImportError:
             QMessageBox.warning(self, "MobileSAM", "ultralytics is not installed.")
+
+    def _reset_model_defaults(self):
+        from src.agent.agent_manager import _DEFAULT_MODELS
+        self.txt_generate_model.setText(_DEFAULT_MODELS["generate_model"])
+        self.txt_edit_model.setText(_DEFAULT_MODELS["edit_model"])
+        self.txt_inpaint_model.setText(_DEFAULT_MODELS["inpaint_model"])
+        self.txt_layered_model.setText(_DEFAULT_MODELS["layered_model"])
 
     def get_values(self):
         return {

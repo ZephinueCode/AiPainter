@@ -20,7 +20,7 @@ except ImportError:
 
 class ImageGenerator(QObject):
     generation_finished = pyqtSignal(object, str) # (QImage or None, error_message)
-    # [新增] 多图层信号: (图片列表, 图层名列表, 错误信息)
+    # Multi Layered
     layered_generation_finished = pyqtSignal(list, list, str)
 
     def __init__(self):
@@ -69,9 +69,7 @@ class ImageGenerator(QObject):
                     negative_prompt=negative_prompt,
                     size=size 
                 )
-                print("--- 原始数据 ---")
                 print(response)
-                print("------------------------")
 
                 if response.status_code == 200:
                     try:
@@ -129,7 +127,7 @@ class ImageGenerator(QObject):
                 openai_size = size.replace("*", "x")
                 
                 response = self.manager.client.images.generate(
-                    model=self.manager.model,
+                    model=self.manager.generate_model,
                     prompt=final_prompt,
                     size=openai_size,
                     quality="standard",
@@ -155,7 +153,7 @@ class ImageGenerator(QObject):
         负责开启异步线程，确保不阻塞主界面。
         """
         if input_image is None:
-            self.layered_generation_finished.emit([], [], "错误：未提供输入图像")
+            self.layered_generation_finished.emit([], [], "Error: No Input Provided.")
             return
 
         # 开启线程执行真正的 API 逻辑
@@ -171,16 +169,30 @@ class ImageGenerator(QObject):
         私有方法：负责 Replicate API 的具体交互流程。
         """
         try:
+            # 0. 设置 Replicate API Key
+            rep_key = self.manager.replicate_api_key
+            if not rep_key:
+                self.layered_generation_finished.emit([], [], "Replicate API Key not configured.\nPlease set it in Settings -> AI Settings.")
+                return
+            # Strip any non-ASCII / invisible characters (e.g. zero-width spaces from copy-paste)
+            rep_key_clean = rep_key.strip().encode('ascii', errors='ignore').decode('ascii')
+            if not rep_key_clean:
+                self.layered_generation_finished.emit([], [], "Replicate API Key contains invalid characters.\nPlease re-enter it in Settings.")
+                return
+            os.environ["REPLICATE_API_TOKEN"] = rep_key_clean
+
             # 1. 准备图片数据
+            clean_img = Image.new("RGBA", input_image.size)
+            clean_img.putdata(list(input_image.getdata()))
             img_byte_arr = io.BytesIO()
-            input_image.save(img_byte_arr, format='PNG')
+            clean_img.save(img_byte_arr, format='PNG')
             img_byte_arr.seek(0)
 
             # 2. 调用模型 (使用最新的稳定版 ID)
             # 也可以把模型 ID 抽离成类常量
-            MODEL_ID = "qwen/qwen-image-layered"
+            MODEL_ID = self.manager.layered_model
 
-            print(f"AI 正在处理...")
+            print(f"AI Processing...")
             output = replicate.run(
                 MODEL_ID,
                 input={
@@ -211,4 +223,6 @@ class ImageGenerator(QObject):
 
         except Exception as e:
             # 捕获所有可能的网络或 API 错误并返回
-            self.layered_generation_finished.emit([], [], f"AI 服务异常: {str(e)}")
+            import traceback
+            traceback.print_exc()  # Print full stack trace to console
+            self.layered_generation_finished.emit([], [], f"AI Service Error: {str(e)}")

@@ -480,7 +480,7 @@ class LayerPanel(QWidget):
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsDropEnabled)
                 elif isinstance(node, GroupLayer):
                     # Folder Icon
-                    item.setText(0, f"📁 {node.name}")
+                    item.setText(0, f"> {node.name}")
                     item.setExpanded(True)
                     item.setBackground(0, QColor("#eaeaea"))
                     build_tree(item, node)
@@ -639,7 +639,7 @@ class LayerPanel(QWidget):
             node.name = text
             item.setText(0, text)
             if isinstance(node, GroupLayer):
-                item.setText(0, f"📁 {text}")
+                item.setText(0, f"> {text}")
 
     def _add_layer(self):
         curr = self.tree.currentItem()

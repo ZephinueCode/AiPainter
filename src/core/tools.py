@@ -686,10 +686,10 @@ class SelectionTool(Tool):
         menu.addSeparator()
         has_layer = self.canvas.active_layer is not None
         if self.has_selection():
-            act_wanx = menu.addAction("🎨 Edit With Wanx-Imageedit", lambda: self._trigger_wanx_inpaint())
+            act_wanx = menu.addAction("Edit Selected Area", lambda: self._trigger_wanx_inpaint())
             act_wanx.setEnabled(has_layer)
         else:
-            act_qwen = menu.addAction("✨ Edit With Qwen-Imageedit", lambda: self._trigger_qwen_edit())
+            act_qwen = menu.addAction("Edit Layer", lambda: self._trigger_qwen_edit())
             act_qwen.setEnabled(has_layer)
         menu.exec(global_pos)
 
@@ -1002,7 +1002,7 @@ class MagicWandTool(Tool):
 
     def _on_model_loaded(self, success, msg):
         if self._status_callback:
-            self._status_callback(msg if success else f"⚠️ {msg}")
+            self._status_callback(msg if success else f"{msg}")
 
     # ── Mouse Events ───────────────────────────────────
 
@@ -1121,7 +1121,7 @@ class MagicWandTool(Tool):
     def _on_inference_error(self, msg):
         self._is_inferring = False
         if self._status_callback:
-            self._status_callback(f"⚠️ Inference failed: {msg}")
+            self._status_callback(f"Inference failed: {msg}")
 
     # ── Public Operations (called by the panel) ────────
 

@@ -6,11 +6,19 @@ import openai
 from openai import OpenAI
 import httpx
 
-# 尝试导入 dashscope
 try:
     import dashscope
 except ImportError:
     dashscope = None
+
+_DEFAULT_MODELS = {
+    "generate_model": "qwen-image-2.0",
+    "edit_model": "qwen-image-2.0",
+    "inpaint_model": "wanx2.1-imageedit",
+    "layered_model": "qwen/qwen-image-layered",
+}
+
+_DEFAULT_REPLICATE_API_KEY = ""
 
 class AIAgentManager:
     _instance = None
@@ -28,9 +36,15 @@ class AIAgentManager:
         self.client = None
         self.base_url = ""
         self.api_key = ""
+        self.replicate_api_key = _DEFAULT_REPLICATE_API_KEY
         self.model = ""
         self.proxy = ""
-        self.provider = "openai" 
+        self.provider = "openai"
+        # Model-specific settings
+        self.generate_model = _DEFAULT_MODELS["generate_model"]
+        self.edit_model = _DEFAULT_MODELS["edit_model"]
+        self.inpaint_model = _DEFAULT_MODELS["inpaint_model"]
+        self.layered_model = _DEFAULT_MODELS["layered_model"]
         self.load_config()
         self._initialized = True
 
@@ -45,9 +59,15 @@ class AIAgentManager:
                     ai_conf = data.get("ai", {})
                     self.base_url = ai_conf.get("base_url", "https://dashscope.aliyuncs.com/api/v1")
                     self.api_key = ai_conf.get("api_key", "")
-                    # 默认为 qwen-vl-max 或 qwen-image-plus，用于图像生成
-                    self.model = ai_conf.get("model", "qwen-vl-max") 
+                    self.model = ai_conf.get("model", "qwen-vl-max")
                     self.proxy = ai_conf.get("proxy", "")
+                    
+                    # Load model-specific settings
+                    self.generate_model = ai_conf.get("generate_model", self.model)
+                    self.edit_model = ai_conf.get("edit_model", _DEFAULT_MODELS["edit_model"])
+                    self.inpaint_model = ai_conf.get("inpaint_model", _DEFAULT_MODELS["inpaint_model"])
+                    self.layered_model = ai_conf.get("layered_model", _DEFAULT_MODELS["layered_model"])
+                    self.replicate_api_key = ai_conf.get("replicate_api_key", "")
                     
                     if "dashscope" in self.base_url or "aliyuncs" in self.base_url:
                         self.provider = "dashscope"
@@ -63,12 +83,29 @@ class AIAgentManager:
             self.model = "qwen-vl-max"
             self.proxy = ""
             self.provider = "dashscope"
+            self.generate_model = _DEFAULT_MODELS["generate_model"]
+            self.edit_model = _DEFAULT_MODELS["edit_model"]
+            self.inpaint_model = _DEFAULT_MODELS["inpaint_model"]
+            self.layered_model = _DEFAULT_MODELS["layered_model"]
+            self.replicate_api_key = _DEFAULT_REPLICATE_API_KEY
 
-    def save_config(self, base_url, api_key, model, proxy=""):
+    def save_config(self, base_url, api_key, model, proxy="",
+                        edit_model=None, inpaint_model=None, layered_model=None,
+                        replicate_api_key=None):
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
+        self.generate_model = model
         self.proxy = proxy
+        
+        if edit_model is not None:
+            self.edit_model = edit_model
+        if inpaint_model is not None:
+            self.inpaint_model = inpaint_model
+        if layered_model is not None:
+            self.layered_model = layered_model
+        if replicate_api_key is not None:
+            self.replicate_api_key = replicate_api_key
         
         if "dashscope" in self.base_url or "aliyuncs" in self.base_url:
             self.provider = "dashscope"
@@ -80,13 +117,19 @@ class AIAgentManager:
             try:
                 with open(self.config_path, 'r') as f:
                     data = json.load(f)
-            except: pass
+            except:
+                pass
             
         data["ai"] = {
             "base_url": self.base_url,
             "api_key": self.api_key,
             "model": self.model,
-            "proxy": self.proxy
+            "proxy": self.proxy,
+            "generate_model": self.generate_model,
+            "edit_model": self.edit_model,
+            "inpaint_model": self.inpaint_model,
+            "layered_model": self.layered_model,
+            "replicate_api_key": self.replicate_api_key,
         }
         
         try:
@@ -115,9 +158,6 @@ class AIAgentManager:
                 
                 if dashscope:
                     dashscope.api_key = self.api_key
-                    # 不要覆盖 dashscope.base_http_api_url 除非用户真的改了非默认值
-                    # dashscope 默认已经是 https://dashscope.aliyuncs.com/api/v1
-                    # 如果用户在界面填的是兼容 URL (带 /compatible-mode/v1)，我们不应该赋给 dashscope SDK
                     if "compatible-mode" not in self.base_url:
                          dashscope.base_http_api_url = self.base_url
                     
@@ -126,14 +166,12 @@ class AIAgentManager:
                 self.client = None
 
     def test_connection(self):
-        if not self.api_key: return False, "API Key missing."
+        if not self.api_key:
+            return False, "API Key missing."
 
-        # DashScope Test
         if self.provider == "dashscope" and dashscope:
             try:
-                # Use a lightweight text model for connection test
                 from dashscope import Generation
-                # Ensure key is set on the library level
                 dashscope.api_key = self.api_key
                 resp = Generation.call(model='qwen-turbo', prompt='Hi')
                 if resp.status_code == 200:
@@ -141,9 +179,10 @@ class AIAgentManager:
                 else:
                     return False, f"DashScope Error: {resp.message}"
             except Exception as e:
-                 pass # Fall through to OpenAI test if this fails (maybe they used OpenAI client for DashScope)
+                pass
                  
-        if not self.client: return False, "Client not initialized."
+        if not self.client:
+            return False, "Client not initialized."
         
         try:
             self.client.models.list()
