@@ -1008,82 +1008,68 @@ class GLCanvas(QOpenGLWidget):
         glDeleteFramebuffers(1, [fbo]); glDeleteTextures([tex]); glBindFramebuffer(GL_FRAMEBUFFER, 0)
 
     def export_to_psd(self, path):
+        """Export layer tree to PSD with group support using raw binary writer."""
         self.makeCurrent()
         glPixelStorei(GL_PACK_ALIGNMENT, 1)
 
-        def process_node(node):
-            # 调试：看看遍历到了什么
-            print(f"正在处理节点: {node.name}, 类型: {type(node)}")
-            type_name = type(node).__name__
+        doc_w, doc_h = self.doc_width, self.doc_height
 
-            if "GroupLayer" in type_name:
-                sub_layers = []
-                for child in node.children:
-                    res = process_node(child)
-                    if res: sub_layers.append(res)
-                
-                group = nested_layers.Group()
-                group.name = node.name
-                group.layers = sub_layers
-                group.closed = False
-                group.opacity = int(node.opacity * 255)
-                group.visible = node.visible
-                return group
+        # Collect layers in PSD order (bottom-to-top in the file = first-to-last in list)
+        # PSD groups use "sandwich" markers: </Layer group> ... layers ... <Group Start>
+        flat_layers = []  # list of dict with 'type': 'layer' | 'group_start' | 'group_end'
 
-            elif isinstance(node, PaintLayer):
-                if not node.texture: return None
-                
+        def collect_layers(node):
+            if isinstance(node, PaintLayer):
                 glBindTexture(GL_TEXTURE_2D, node.texture)
-                raw_data = glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE)
-                img = Image.frombytes("RGBA", (node.width, node.height), raw_data)
+                raw = glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE)
+                img = Image.frombytes("RGBA", (node.width, node.height), raw)
                 img = img.transpose(Image.FLIP_TOP_BOTTOM)
-                
-                bbox = img.getbbox()
-                if not bbox:
-                    # 遇到完全空白的图层，直接跳过，防止 pytoshop 崩溃
-                    return None
+                if img.size != (doc_w, doc_h):
+                    canvas = Image.new("RGBA", (doc_w, doc_h), (0, 0, 0, 0))
+                    canvas.paste(img, (0, 0))
+                    img = canvas
+                flat_layers.append({
+                    'type': 'layer',
+                    'name': node.name[:255],
+                    'image': img,
+                    'opacity': int(node.opacity * 255),
+                    'visible': node.visible,
+                })
+            elif isinstance(node, GroupLayer) and node != self.root:
+                flat_layers.append({
+                    'type': 'group_end',
+                    'name': node.name[:255],
+                    'opacity': int(node.opacity * 255),
+                    'visible': node.visible,
+                })
+                for child in reversed(node.children):      # ← 改为 reversed
+                    collect_layers(child)
+                flat_layers.append({
+                    'type': 'group_start',
+                    'name': node.name[:255],
+                    'opacity': int(node.opacity * 255),
+                    'visible': node.visible,
+                })
+            elif node == self.root:
+                for child in reversed(node.children):       # ← 改为 reversed
+                    collect_layers(child)
 
-                img = img.crop(bbox)
-                left, top, right, bottom = bbox[0], bbox[1], bbox[2], bbox[3]
-                img_np = np.array(img)
-                
-                channels = {
-                    0: img_np[:, :, 0], 
-                    1: img_np[:, :, 1], 
-                    2: img_np[:, :, 2], 
-                    -1: img_np[:, :, 3]  
-                }
-                layer = nested_layers.Image(
-                    name=node.name,
-                    top=top,
-                    left=left,
-                    bottom=bottom,
-                    right=right,
-                    channels=channels,
-                    opacity=int(node.opacity * 255),
-                    visible=node.visible,
-                    color_mode=enums.ColorMode.rgb
-                )
-                layer.mask = None
-                return layer
-            return None
-        all_layers = []
-        for child in reversed(self.root.children):
-            layer_obj = process_node(child)
-            if layer_obj:
-                all_layers.append(layer_obj)
+        collect_layers(self.root)
 
-        if not all_layers:
-            print("拦截：画布完全为空，没有像素可以导出。")
+        if not flat_layers:
+            print("No layers to export.")
             return
+
+        # Collect all real images for composite
+        real_layers = [l for l in flat_layers if l['type'] == 'layer']
+
         try:
-            psd = nested_layers.nested_layers_to_psd(all_layers, color_mode=enums.ColorMode.rgb)
-            
-            with open(path, 'wb') as f:
-                psd.write(f)
-            print(f"PSD 成功导出！包含图层组结构：{path}")
+            _write_psd_file(path, doc_w, doc_h, flat_layers, real_layers)
+            print(f"PSD exported successfully (with groups): {path}")
         except Exception as e:
-            print(f"pytoshop 最终合并失败: {e}")
+            print(f"PSD export failed: {e}")
+            import traceback
+            traceback.print_exc()
 
     def set_brush(self, config):
         self.current_brush = config
@@ -1254,3 +1240,261 @@ class CanvasWidget(QWidget):
         if not self.h_bar.isHidden(): self.gl_canvas.offset.setX(float(-self.h_bar.value()))
         if not self.v_bar.isHidden(): self.gl_canvas.offset.setY(float(-self.v_bar.value()))
         self.gl_canvas.update()
+
+# ══════════════════════════════════════════════════════════════
+# Minimal PSD Writer — supports flat RGBA layers, no dependencies
+# ══════════════════════════════════════════════════════════════
+
+import struct
+
+def _pack_psd_string(s, padding=4):
+    """Encode a Pascal string with padding."""
+    b = s.encode('utf-8')[:255]
+    length = len(b)
+    data = struct.pack('B', length) + b
+    # Pad to multiple of `padding`
+    while len(data) % padding != 0:
+        data += b'\x00'
+    return data
+
+
+def _compress_channel_rle(channel_data, height, width):
+    """RLE-compress a single channel (H×W uint8 array). Returns (byte_counts, compressed_data)."""
+    rows = []
+    byte_counts = []
+    for y in range(height):
+        row = channel_data[y]
+        # PackBits RLE encoding
+        compressed_row = _packbits_encode(row.tobytes())
+        rows.append(compressed_row)
+        byte_counts.append(len(compressed_row))
+    return byte_counts, b''.join(rows)
+
+
+def _packbits_encode(data):
+    """Pure-Python PackBits encoder."""
+    result = bytearray()
+    i = 0
+    n = len(data)
+    while i < n:
+        # Look for a run of identical bytes
+        run_start = i
+        if i + 1 < n and data[i] == data[i + 1]:
+            # Count run
+            j = i + 2
+            while j < n and j - run_start < 128 and data[j] == data[run_start]:
+                j += 1
+            run_len = j - run_start
+            result.append(256 - (run_len - 1) & 0xFF)  # -(run_len-1) as unsigned byte
+            result.append(data[run_start])
+            i = j
+        else:
+            # Literal run
+            j = i + 1
+            while j < n and j - run_start < 128:
+                if j + 1 < n and data[j] == data[j + 1]:
+                    break
+                j += 1
+            lit_len = j - run_start
+            result.append(lit_len - 1)
+            result.extend(data[run_start:j])
+            i = j
+    return bytes(result)
+
+
+def _write_psd_file(path, width, height, flat_layers, real_layers):
+    """
+    Write a PSD file with RGBA layers and group support.
+    
+    flat_layers: list of dicts with keys:
+        'type': 'layer' | 'group_start' | 'group_end'
+        'name': str
+        'image': PIL Image (only for 'layer' type)
+        'opacity': int (0-255)
+        'visible': bool
+    real_layers: list of layer dicts (type=='layer' only) for composite
+    """
+    num_layers = len(flat_layers)
+
+    # ════════════════════════════════════════
+    # Section 1: File Header
+    # ════════════════════════════════════════
+    header = b'8BPS'
+    header += struct.pack('>H', 1)            # Version
+    header += b'\x00' * 6                     # Reserved
+    header += struct.pack('>H', 4)            # Channels (RGBA)
+    header += struct.pack('>I', height)
+    header += struct.pack('>I', width)
+    header += struct.pack('>H', 8)            # Bits per channel
+    header += struct.pack('>H', 3)            # Color mode: RGB
+
+    # ════════════════════════════════════════
+    # Section 2: Color Mode Data
+    # ════════════════════════════════════════
+    color_mode_data = struct.pack('>I', 0)
+
+    # ════════════════════════════════════════
+    # Section 3: Image Resources
+    # ════════════════════════════════════════
+    image_resources = struct.pack('>I', 0)
+
+    # ════════════════════════════════════════
+    # Section 4: Layer and Mask Information
+    # ════════════════════════════════════════
+
+    # Pre-compress all channels
+    layer_channel_data = []
+    for entry in flat_layers:
+        if entry['type'] == 'layer':
+            img = entry['image']
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+            arr = np.array(img)
+            channels = []
+            for ch_id, ch_idx in [(-1, 3), (0, 0), (1, 1), (2, 2)]:
+                ch_data = arr[:, :, ch_idx]
+                byte_counts, compressed = _compress_channel_rle(ch_data, height, width)
+                ch_blob = struct.pack('>H', 1)  # RLE
+                for bc in byte_counts:
+                    ch_blob += struct.pack('>H', bc)
+                ch_blob += compressed
+                channels.append((ch_id, ch_blob))
+            layer_channel_data.append(channels)
+        else:
+            # Group markers: 4 channels of transparent 1x1 (minimal)
+            channels = []
+            for ch_id in [-1, 0, 1, 2]:
+                # Empty channel: raw compression, single zero row
+                ch_blob = struct.pack('>H', 0)  # 0 = raw
+                ch_blob += b'\x00' * width * height
+                channels.append((ch_id, ch_blob))
+            layer_channel_data.append(channels)
+
+    # Build Layer Info
+    layer_info = b''
+    layer_info += struct.pack('>h', num_layers)
+
+    # Layer records
+    for i, entry in enumerate(flat_layers):
+        if entry['type'] == 'layer':
+            # Full canvas bounds
+            layer_info += struct.pack('>i', 0)       # top
+            layer_info += struct.pack('>i', 0)       # left
+            layer_info += struct.pack('>i', height)   # bottom
+            layer_info += struct.pack('>i', width)    # right
+        else:
+            # Group markers: zero-size rect
+            layer_info += struct.pack('>i', 0)
+            layer_info += struct.pack('>i', 0)
+            layer_info += struct.pack('>i', 0)
+            layer_info += struct.pack('>i', 0)
+
+        # Number of channels
+        layer_info += struct.pack('>H', 4)
+
+        # Channel info
+        for ch_id, ch_blob in layer_channel_data[i]:
+            layer_info += struct.pack('>h', ch_id)
+            layer_info += struct.pack('>I', len(ch_blob))
+
+        # Blend mode signature + key
+        layer_info += b'8BIM'
+        if entry['type'] == 'group_start':
+            layer_info += b'pass'  # pass-through blend for group opener
+        else:
+            layer_info += b'norm'
+
+        # Opacity
+        layer_info += struct.pack('B', entry['opacity'])
+        # Clipping
+        layer_info += struct.pack('B', 0)
+        # Flags
+        flags = 0x00 if entry['visible'] else 0x02
+        layer_info += struct.pack('B', flags)
+        # Filler
+        layer_info += b'\x00'
+
+        # Extra data
+        extra_data = b''
+        # Layer mask data (none)
+        extra_data += struct.pack('>I', 0)
+        # Blending ranges (none)
+        extra_data += struct.pack('>I', 0)
+        # Layer name
+        extra_data += _pack_psd_string(entry['name'], padding=4)
+
+        # Section divider (lsct) for group markers
+        if entry['type'] in ('group_start', 'group_end'):
+            lsct_data = b''
+            if entry['type'] == 'group_end':
+                # Type 3 = bounding section divider (hidden "end" marker)
+                lsct_data += struct.pack('>I', 3)
+            else:
+                # Type 1 = open folder
+                lsct_data += struct.pack('>I', 1)
+            lsct_data += b'8BIM'
+            lsct_data += b'pass'
+
+            # Write as additional layer info block
+            extra_data += b'8BIM'       # signature
+            extra_data += b'lsct'       # key
+            extra_data += struct.pack('>I', len(lsct_data))
+            extra_data += lsct_data
+
+        layer_info += struct.pack('>I', len(extra_data))
+        layer_info += extra_data
+
+    # Channel image data for all layers
+    for channels in layer_channel_data:
+        for ch_id, ch_blob in channels:
+            layer_info += ch_blob
+
+    # Pad to even
+    if len(layer_info) % 2 != 0:
+        layer_info += b'\x00'
+
+    layer_info_block = struct.pack('>I', len(layer_info)) + layer_info
+    global_mask = struct.pack('>I', 0)
+    section4_content = layer_info_block + global_mask
+    section4 = struct.pack('>I', len(section4_content)) + section4_content
+
+    # ════════════════════════════════════════
+    # Section 5: Composite Image Data
+    # ════════════════════════════════════════
+    composite = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+    # Real layers in reverse order (flat_layers is bottom-to-top for PSD,
+    # but real_layers keeps insertion order which matches render order)
+    for layer in real_layers:
+        if layer['visible']:
+            limg = layer['image'].copy()
+            if layer['opacity'] < 255:
+                a = np.array(limg)
+                a[:, :, 3] = (a[:, :, 3].astype(np.float32) * layer['opacity'] / 255).astype(np.uint8)
+                limg = Image.fromarray(a)
+            composite = Image.alpha_composite(composite, limg)
+
+    comp_arr = np.array(composite.convert("RGB"))
+    image_data = struct.pack('>H', 1)  # RLE
+
+    all_byte_counts = []
+    all_compressed = []
+    for ch_idx in range(3):
+        ch = comp_arr[:, :, ch_idx]
+        byte_counts, compressed = _compress_channel_rle(ch, height, width)
+        all_byte_counts.extend(byte_counts)
+        all_compressed.append(compressed)
+
+    for bc in all_byte_counts:
+        image_data += struct.pack('>H', bc)
+    for comp in all_compressed:
+        image_data += comp
+
+    # ════════════════════════════════════════
+    # Write
+    # ════════════════════════════════════════
+    with open(path, 'wb') as f:
+        f.write(header)
+        f.write(color_mode_data)
+        f.write(image_resources)
+        f.write(section4)
+        f.write(image_data)
