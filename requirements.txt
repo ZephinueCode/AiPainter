@@ -11,3 +11,5 @@ six
 packbits
 replicate
 ultralytics
+requests
+scipy

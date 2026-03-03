@@ -14,6 +14,7 @@ from src.core.processor import ImageProcessor
 from src.gui.dialogs import GradientMapDialog, AdjustmentDialog
 import os
 import uuid
+import io
 from pytoshop.user import nested_layers
 from pytoshop import enums
 import pytoshop
@@ -37,7 +38,7 @@ class GLCanvas(QOpenGLWidget):
         self.offset = QPointF(0, 0)
         
         self.root = GroupLayer("Root")
-        self.active_layer = None
+        self._active_layer = None
         
         self.current_brush = None
         self._brush_color = [0,0,0]
@@ -66,6 +67,23 @@ class GLCanvas(QOpenGLWidget):
     def brush_color(self, val):
         self._brush_color = val
         self.brush_color_changed.emit(val if isinstance(val, list) else list(val))
+
+    @property
+    def active_layer(self):
+        return self._active_layer
+
+    @active_layer.setter
+    def active_layer(self, value):
+        if value is not self._active_layer:
+            # Layer changed → clear selection (it belongs to the old layer)
+            self.selection_path = QPainterPath()
+            self.selection_feather_mask = None
+            # Commit any in-progress floating transform
+            if self.active_tool and hasattr(self.active_tool, 'commit_transform'):
+                self.active_tool.commit_transform()
+                if hasattr(self.active_tool, 'floating_items'):
+                    self.active_tool.floating_items = []
+        self._active_layer = value
 
     def set_tool(self, tool_name):
         if self.active_tool:
@@ -247,6 +265,10 @@ class GLCanvas(QOpenGLWidget):
             p = p.parent
         return op
 
+    def _screen_to_doc(self, screen_pt):
+        """Convert widget (screen) coordinates to document coordinates."""
+        return (screen_pt - self.offset) / self.zoom
+
     def mousePressEvent(self, event):
         self.setFocus()
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -311,6 +333,17 @@ class GLCanvas(QOpenGLWidget):
         ctrl = event.modifiers() & Qt.KeyboardModifier.ControlModifier
         
         if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
+            # If there's a floating selection, discard it (restore layer snapshot)
+            tool = self.active_tool
+            if tool and hasattr(tool, 'floating_items') and tool.floating_items:
+                for item in tool.floating_items:
+                    item['layer'].load_from_image(item['snapshot'])
+                tool.floating_items = []
+                self.selection_path = QPainterPath()
+                self.selection_feather_mask = None
+                self.update()
+                return
+
             if not self.selection_path.isEmpty():
                 if self.active_layer and isinstance(self.active_layer, PaintLayer):
                     mask = ClipboardUtils.get_selection_mask(self)
@@ -367,12 +400,16 @@ class GLCanvas(QOpenGLWidget):
     def show_default_context_menu(self, event):
         menu = QMenu(self)
         clipboard = QApplication.clipboard()
-        can_paste = clipboard.mimeData().hasImage()
-        act_paste = menu.addAction("Paste", lambda: ClipboardUtils.paste(self))
+        can_paste = clipboard.mimeData().hasImage() or getattr(self, '_clip_image', None) is not None
+        doc_pos = self._screen_to_doc(event.position())
+        act_paste = menu.addAction("Paste", lambda: ClipboardUtils.paste(self, at_position=doc_pos))
         act_paste.setEnabled(can_paste)
         
         menu.addSeparator()
         menu.addAction("✨ AI Generate Layered (Test)", self.test_trigger_ai)#for test
+        act_qwen = menu.addAction("✨ Edit With Qwen-Imageedit", self.start_qwen_edit)
+        act_qwen.setEnabled(self.active_layer is not None and isinstance(self.active_layer, PaintLayer))
+        menu.addSeparator()
         menu.addAction("HSL Adjustment", lambda: self.open_adjustment("HSL"))
         menu.addAction("Contrast", lambda: self.open_adjustment("Contrast"))
         menu.addAction("Exposure", lambda: self.open_adjustment("Exposure"))
@@ -453,6 +490,339 @@ class GLCanvas(QOpenGLWidget):
         except Exception as e:
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "导入错误", f"处理 AI 图层时出错: {str(e)}")
+
+    # ── Inpaint / Image-Edit ─────────────────────────────
+
+    @staticmethod
+    def _layer_has_transparency(pil_rgba):
+        """Check whether the layer uses transparency (has any alpha < 255)."""
+        if pil_rgba.mode != "RGBA":
+            return False
+        alpha = np.array(pil_rgba.split()[3])
+        return bool(np.any(alpha < 255))
+
+    def _prompt_with_rmwhite(self, title, label, show_checkbox):
+        """Show a prompt dialog that optionally includes a 'Remove White BG' checkbox.
+
+        Returns (prompt_str, remove_white_bg_bool, accepted_bool).
+        """
+        from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QLabel as _L,
+                                      QLineEdit, QCheckBox, QDialogButtonBox)
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(_L(label))
+        edit = QLineEdit()
+        layout.addWidget(edit)
+
+        cb = None
+        if show_checkbox:
+            cb = QCheckBox("Auto Remove White Background on result")
+            cb.setChecked(True)
+            layout.addWidget(cb)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+
+        ok = dlg.exec() == QDialog.DialogCode.Accepted
+        remove_bg = cb.isChecked() if cb else False
+        return edit.text(), remove_bg, ok
+
+    def start_wanx_inpaint(self):
+        """Launch Wanx inpaint: selection mask + prompt → local repaint."""
+        if not self.active_layer or not isinstance(self.active_layer, PaintLayer):
+            QMessageBox.warning(self, "No Layer", "Please select a Paint Layer.")
+            return
+        if self.selection_path.isEmpty():
+            QMessageBox.warning(self, "No Selection", "Please create a selection first.")
+            return
+
+        self.makeCurrent()
+        base_img = self.active_layer.get_image()  # PIL RGBA
+        has_transp = self._layer_has_transparency(base_img)
+
+        prompt, remove_bg, ok = self._prompt_with_rmwhite(
+            "Wanx Inpaint",
+            "Describe what to generate in the selected area:\n(Leave empty for automatic)",
+            show_checkbox=has_transp,
+        )
+        if not ok:
+            return
+        # Wanx API requires a non-empty prompt; use a space as placeholder
+        prompt_to_send = prompt.strip() if prompt.strip() else " "
+
+        # Build binary mask (white = edit area) at layer dimensions
+        mask = self._build_inpaint_mask()
+        if mask is None:
+            QMessageBox.warning(self, "Mask Error", "Failed to build selection mask.")
+            return
+
+        # Convert RGBA → RGB for the API (white background)
+        if base_img.mode == "RGBA":
+            bg = Image.new("RGB", base_img.size, (255, 255, 255))
+            bg.paste(base_img, mask=base_img.split()[3])
+            base_rgb = bg
+        else:
+            base_rgb = base_img.convert("RGB")
+
+        # Convert mask to RGB (API expects image)
+        mask_rgb = mask.convert("RGB")
+
+        from src.agent.inpaint_service import WanxInpaintThread
+        self._inpaint_old_img = base_img.copy()  # for undo
+        self._inpaint_remove_white_bg = remove_bg
+        self._inpaint_thread = WanxInpaintThread(base_rgb, mask_rgb, prompt_to_send)
+        self._inpaint_thread.progress.connect(self._on_inpaint_progress)
+        self._inpaint_thread.finished.connect(self._on_wanx_inpaint_finished)
+        self._show_inpaint_progress("Wanx Inpaint", prompt_to_send, base_rgb, mask)
+        self._inpaint_thread.start()
+
+    def start_qwen_edit(self):
+        """Launch Qwen image edit: prompt-only whole-image edit.
+
+        Always sends the full canvas-sized image (doc_width × doc_height).
+        The QwenEditThread handles resize if the canvas dimensions are outside
+        the API's [512, 2048] range, and scales the result back afterwards.
+        """
+        if not self.active_layer or not isinstance(self.active_layer, PaintLayer):
+            QMessageBox.warning(self, "No Layer", "Please select a Paint Layer.")
+            return
+
+        self.makeCurrent()
+        base_img = self.active_layer.get_image()  # PIL RGBA, doc-sized
+
+        if base_img.getbbox() is None:
+            QMessageBox.warning(self, "Empty Layer", "The layer has no visible content.")
+            return
+
+        has_transp = self._layer_has_transparency(base_img)
+
+        prompt, remove_bg, ok = self._prompt_with_rmwhite(
+            "Qwen Image Edit",
+            "Describe the edit you want to make:",
+            show_checkbox=has_transp,
+        )
+        if not ok or not prompt.strip():
+            return
+
+        # Convert full canvas RGBA → RGB (white background) for the API
+        if base_img.mode == "RGBA":
+            bg = Image.new("RGB", base_img.size, (255, 255, 255))
+            bg.paste(base_img, mask=base_img.split()[3])
+            send_rgb = bg
+        else:
+            send_rgb = base_img.convert("RGB")
+
+        from src.agent.inpaint_service import QwenEditThread
+        self._inpaint_old_img = base_img.copy()
+        self._inpaint_remove_white_bg = remove_bg
+        self._inpaint_thread = QwenEditThread(send_rgb, prompt.strip())
+        self._inpaint_thread.progress.connect(self._on_inpaint_progress)
+        self._inpaint_thread.finished.connect(self._on_qwen_edit_finished)
+        self._show_inpaint_progress("Qwen Image Edit", prompt.strip(), send_rgb, None)
+        self._inpaint_thread.start()
+
+    def _build_inpaint_mask(self):
+        """Build a binary/feathered L-mode mask from the current selection.
+        
+        Returns a PIL Image (mode 'L') of size (doc_width, doc_height).
+        White (255) = area to edit, Black (0) = keep.
+        For feathered selections the gradient is preserved so the mask
+        boundary reflects the feather extent.
+        """
+        # Use the stored feather mask if available (from Magic Wand with feather)
+        if hasattr(self, 'selection_feather_mask') and self.selection_feather_mask is not None:
+            mask_arr = self.selection_feather_mask
+            # Threshold to binary – any feathered pixel > 0 becomes part of the mask.
+            # This expands the mask to cover the full feather zone.
+            import cv2
+            # Use threshold at 1 to include the entire feathered gradient
+            _, binary = cv2.threshold(mask_arr, 1, 255, cv2.THRESH_BINARY)
+            return Image.fromarray(binary, mode="L")
+
+        # Otherwise rasterize from QPainterPath
+        if self.selection_path.isEmpty():
+            return None
+
+        from PyQt6.QtGui import QImage as _QImage, QPainter as _QPainter
+        from PyQt6.QtCore import QIODevice as _QIODevice
+        from PyQt6.QtCore import QBuffer as _QBuffer
+
+        w, h = self.doc_width, self.doc_height
+        qimg = _QImage(w, h, _QImage.Format.Format_Grayscale8)
+        qimg.fill(0)
+
+        painter = _QPainter(qimg)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255))
+        painter.drawPath(self.selection_path)
+        painter.end()
+
+        buf = _QBuffer()
+        buf.open(_QIODevice.OpenModeFlag.ReadWrite)
+        qimg.save(buf, "PNG")
+        try:
+            mask = Image.open(io.BytesIO(bytes(buf.data()))).convert("L")
+            return mask
+        except Exception:
+            return None
+
+    def _show_inpaint_progress(self, title, prompt, base_pil, mask_pil=None):
+        """Show a rich progress dialog with prompt, image preview and optional mask."""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar
+        from PyQt6.QtGui import QPixmap
+        from PyQt6.QtCore import QByteArray, QBuffer as _Buf, QIODevice as _IO
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        dlg.setMinimumWidth(480)
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        layout = QVBoxLayout(dlg)
+
+        # Prompt
+        prompt_label = QLabel(f"<b>Prompt:</b> {prompt}")
+        prompt_label.setWordWrap(True)
+        layout.addWidget(prompt_label)
+
+        # Preview images
+        preview_row = QHBoxLayout()
+
+        def _pil_to_pixmap(pil_img, max_w=200, max_h=150):
+            buf = io.BytesIO()
+            pil_img.save(buf, "PNG")
+            pm = QPixmap()
+            pm.loadFromData(buf.getvalue())
+            return pm.scaled(max_w, max_h, Qt.AspectRatioMode.KeepAspectRatio,
+                             Qt.TransformationMode.SmoothTransformation)
+
+        # Base image preview
+        img_box = QVBoxLayout()
+        img_box.addWidget(QLabel("<b>Input Image</b>"))
+        img_lbl = QLabel()
+        img_lbl.setPixmap(_pil_to_pixmap(base_pil))
+        img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        img_box.addWidget(img_lbl)
+        preview_row.addLayout(img_box)
+
+        # Mask preview (if any)
+        if mask_pil is not None:
+            mask_box = QVBoxLayout()
+            mask_box.addWidget(QLabel("<b>Mask</b>"))
+            mask_lbl = QLabel()
+            mask_lbl.setPixmap(_pil_to_pixmap(mask_pil.convert("RGB")))
+            mask_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            mask_box.addWidget(mask_lbl)
+            preview_row.addLayout(mask_box)
+
+        layout.addLayout(preview_row)
+
+        # Progress bar (indeterminate)
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 0)  # indeterminate
+        layout.addWidget(self._progress_bar)
+
+        # Status label
+        self._progress_status = QLabel("Preparing…")
+        self._progress_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._progress_status)
+
+        dlg.setLayout(layout)
+        dlg.show()
+        self._progress_dlg = dlg
+
+    def _on_inpaint_progress(self, msg):
+        if hasattr(self, '_progress_status') and self._progress_status:
+            self._progress_status.setText(msg)
+
+    def _on_wanx_inpaint_finished(self, result_img, error):
+        if hasattr(self, '_progress_dlg') and self._progress_dlg:
+            self._progress_dlg.close()
+            self._progress_dlg = None
+
+        if error:
+            QMessageBox.warning(self, "Wanx Inpaint Failed", error)
+            return
+
+        if result_img is None:
+            return
+
+        self._apply_inpaint_result(result_img)
+
+    def _on_qwen_edit_finished(self, result_img, error):
+        if hasattr(self, '_progress_dlg') and self._progress_dlg:
+            self._progress_dlg.close()
+            self._progress_dlg = None
+
+        if error:
+            QMessageBox.warning(self, "Qwen Edit Failed", error)
+            return
+
+        if result_img is None:
+            return
+
+        self._apply_qwen_result(result_img)
+
+    def _apply_qwen_result(self, result_img):
+        """Apply Qwen-edited image back to the active layer (full canvas size)."""
+        if not self.active_layer or not isinstance(self.active_layer, PaintLayer):
+            return
+
+        self.makeCurrent()
+
+        old_img = getattr(self, '_inpaint_old_img', self.active_layer.get_image())
+
+        if result_img.mode != "RGBA":
+            result_img = result_img.convert("RGBA")
+
+        # The thread already returns an image at canvas size; safety resize
+        lw, lh = self.active_layer.width, self.active_layer.height
+        if result_img.size != (lw, lh):
+            result_img = result_img.resize((lw, lh), Image.LANCZOS)
+
+        # Auto-remove white background if the user opted in
+        if getattr(self, '_inpaint_remove_white_bg', False):
+            from src.core.processor import remove_white_background
+            result_img = remove_white_background(result_img)
+
+        cmd = PaintCommand(self.active_layer, old_img, result_img)
+        self.undo_stack.push(cmd)
+
+        self.active_layer.load_from_image(result_img)
+        self.update()
+        self._inpaint_old_img = None
+        self._inpaint_remove_white_bg = False
+
+    def _apply_inpaint_result(self, result_img):
+        """Apply the AI-edited image back to the current layer with undo support."""
+        if not self.active_layer or not isinstance(self.active_layer, PaintLayer):
+            return
+
+        self.makeCurrent()
+
+        # Resize result to match layer dimensions if needed
+        lw, lh = self.active_layer.width, self.active_layer.height
+        if result_img.size != (lw, lh):
+            result_img = result_img.resize((lw, lh), Image.LANCZOS)
+
+        if result_img.mode != "RGBA":
+            result_img = result_img.convert("RGBA")
+
+        # Auto-remove white background if the user opted in
+        if getattr(self, '_inpaint_remove_white_bg', False):
+            from src.core.processor import remove_white_background
+            result_img = remove_white_background(result_img)
+
+        old_img = getattr(self, '_inpaint_old_img', self.active_layer.get_image())
+
+        cmd = PaintCommand(self.active_layer, old_img, result_img)
+        self.undo_stack.push(cmd)
+
+        self.active_layer.load_from_image(result_img)
+        self.update()
+        self._inpaint_old_img = None
+        self._inpaint_remove_white_bg = False
 
     def open_adjustment(self, type):
         if not self.active_layer or not isinstance(self.active_layer, PaintLayer): return

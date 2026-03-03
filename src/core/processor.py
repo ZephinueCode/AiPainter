@@ -4,6 +4,84 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageDraw
 import colorsys
 import numpy as np
 
+
+def remove_white_background(image: Image.Image, threshold: int = 245) -> Image.Image:
+    """Remove white background by flood-filling from the image edges inward.
+
+    Only white-ish pixels that are *reachable* from the border are made
+    transparent.  Interior white regions (e.g. white text, white clothing)
+    are left untouched.
+
+    Parameters
+    ----------
+    image : PIL.Image
+        Input image (any mode – will be converted to RGBA).
+    threshold : int
+        A pixel is considered "white" when all of R, G, B >= *threshold*.
+        Default 245 gives a small tolerance for JPEG artefacts.
+
+    Returns
+    -------
+    PIL.Image in RGBA mode.
+    """
+    if image.mode != "RGBA":
+        image = image.convert("RGBA")
+
+    arr = np.array(image)  # H×W×4 uint8
+    h, w = arr.shape[:2]
+
+    # Boolean mask: True where pixel is "white enough"
+    white_mask = np.all(arr[:, :, :3] >= threshold, axis=2)  # H×W
+
+    # BFS / flood-fill from every white border pixel
+    visited = np.zeros((h, w), dtype=bool)
+    from collections import deque
+    queue = deque()
+
+    # Seed from all four edges
+    for x in range(w):
+        if white_mask[0, x] and not visited[0, x]:
+            visited[0, x] = True
+            queue.append((0, x))
+        if white_mask[h - 1, x] and not visited[h - 1, x]:
+            visited[h - 1, x] = True
+            queue.append((h - 1, x))
+    for y in range(h):
+        if white_mask[y, 0] and not visited[y, 0]:
+            visited[y, 0] = True
+            queue.append((y, 0))
+        if white_mask[y, w - 1] and not visited[y, w - 1]:
+            visited[y, w - 1] = True
+            queue.append((y, w - 1))
+
+    # 4-connected flood fill
+    while queue:
+        cy, cx = queue.popleft()
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            ny, nx = cy + dy, cx + dx
+            if 0 <= ny < h and 0 <= nx < w and not visited[ny, nx] and white_mask[ny, nx]:
+                visited[ny, nx] = True
+                queue.append((ny, nx))
+
+    # Make flood-filled region transparent
+    arr[visited, 3] = 0
+
+    # Optional: soften the edge by one pixel to avoid hard jaggies
+    # Dilate the visited mask by 1 px, then for the newly-added border pixels
+    # set alpha proportional to how "non-white" they are.
+    from scipy.ndimage import binary_dilation
+    dilated = binary_dilation(visited, iterations=1)
+    edge = dilated & ~visited
+    if np.any(edge):
+        # For edge pixels: alpha = 255 * (1 - whiteness)
+        rgb = arr[edge, :3].astype(np.float32)
+        whiteness = rgb.min(axis=1) / 255.0  # 1.0 for pure white
+        new_alpha = (255 * (1.0 - whiteness)).clip(0, 255).astype(np.uint8)
+        # Only reduce alpha, never increase
+        arr[edge, 3] = np.minimum(arr[edge, 3], new_alpha)
+
+    return Image.fromarray(arr, "RGBA")
+
 class ImageProcessor:
     @staticmethod
     def adjust_hsl(image, hue_delta, sat_factor, light_delta):

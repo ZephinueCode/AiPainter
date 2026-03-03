@@ -14,138 +14,275 @@ import math
 
 # === Clipboard Utils ===
 class ClipboardUtils:
+    """Internal clipboard for selection-aware copy/cut/paste.
+
+    Stores data on the *canvas* object so the SelectionTool can create
+    floating overlays on paste.
+
+    Canvas attributes used:
+        _clip_image       – PIL RGBA cropped image
+        _clip_offset      – (x, y) original top-left of the crop in doc coords
+        _clip_path        – QPainterPath of the selection at copy time
+        _clip_feather     – numpy H×W uint8 feather mask or None
+        _clip_was_cut     – bool  (True = cut, False = copy)
+    """
+
     @staticmethod
     def get_selection_mask(canvas):
         if not hasattr(canvas, 'selection_path') or canvas.selection_path.isEmpty():
             return None
-        
-        # If a feathered gradient mask is stored, use it directly
+
         if hasattr(canvas, 'selection_feather_mask') and canvas.selection_feather_mask is not None:
-            mask_arr = canvas.selection_feather_mask
-            return Image.fromarray(mask_arr, mode="L")
+            return Image.fromarray(canvas.selection_feather_mask, mode="L")
 
         w, h = canvas.doc_width, canvas.doc_height
         qimg = QImage(w, h, QImage.Format.Format_Grayscale8)
         qimg.fill(0)
-        
         painter = QPainter(qimg)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(255, 255, 255))
         painter.drawPath(canvas.selection_path)
         painter.end()
-        
         buffer = QBuffer()
         buffer.open(QIODevice.OpenModeFlag.ReadWrite)
         qimg.save(buffer, "PNG")
         try:
-            mask = Image.open(io.BytesIO(bytes(buffer.data()))).convert("L")
-            return mask
-        except: return None
+            return Image.open(io.BytesIO(bytes(buffer.data()))).convert("L")
+        except:
+            return None
 
+    @staticmethod
+    def _rasterize_mask_from_path(path, w, h):
+        """Rasterize a QPainterPath into a PIL 'L' mask."""
+        qimg = QImage(w, h, QImage.Format.Format_Grayscale8)
+        qimg.fill(0)
+        painter = QPainter(qimg)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255))
+        painter.drawPath(path)
+        painter.end()
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.ReadWrite)
+        qimg.save(buffer, "PNG")
+        try:
+            return Image.open(io.BytesIO(bytes(buffer.data()))).convert("L")
+        except:
+            return None
+
+    # ------------------------------------------------------------------ copy
     @staticmethod
     def copy(canvas):
-        if not canvas.active_layer: return False
+        if not canvas.active_layer:
+            return False
+
+        # Check if there is a floating selection on the active tool.
+        # If so, copy the floating content instead of the layer pixels.
+        tool = canvas.active_tool
+        floating = (tool and hasattr(tool, 'floating_items') and tool.floating_items)
+
+        if floating:
+            # Composite all floating items into one PIL image
+            item = tool.floating_items[0]
+            qimg = item['qimg']
+            buf = QBuffer()
+            buf.open(QIODevice.OpenModeFlag.ReadWrite)
+            qimg.save(buf, "PNG")
+            res = Image.open(io.BytesIO(bytes(buf.data()))).convert("RGBA")
+            # The offset is the current tf_pos (may have been dragged)
+            offset = (int(tool.tf_pos.x()), int(tool.tf_pos.y()))
+        else:
+            try:
+                img = canvas.active_layer.get_image()
+            except:
+                return False
+
+            mask = ClipboardUtils.get_selection_mask(canvas)
+            if mask:
+                mask_arr = np.array(mask, dtype=np.float32) / 255.0
+                img_arr = np.array(img, dtype=np.float32)
+                res_arr = img_arr.copy()
+                res_arr[..., 3] *= mask_arr
+                res = Image.fromarray(res_arr.clip(0, 255).astype(np.uint8), "RGBA")
+                bbox = mask.getbbox()
+                if bbox:
+                    res = res.crop(bbox)
+                    offset = (bbox[0], bbox[1])
+                else:
+                    offset = (0, 0)
+            else:
+                res = img.copy()
+                offset = (0, 0)
+
+        # Store on canvas
+        canvas._clip_image = res
+        canvas._clip_offset = offset
+        canvas._clip_path = QPainterPath(canvas.selection_path)
+        canvas._clip_feather = (
+            canvas.selection_feather_mask.copy()
+            if getattr(canvas, 'selection_feather_mask', None) is not None
+            else None
+        )
+        canvas._clip_was_cut = False
+
+        # Clear visible selection after copy
+        canvas.selection_path = QPainterPath()
+        canvas.selection_feather_mask = None
+
+        # If there are floating items, discard them without committing
+        # (the content was already captured above)
+        if floating:
+            for item in tool.floating_items:
+                item['layer'].load_from_image(item['snapshot'])
+            tool.floating_items = []
+
+        # Also put on system clipboard for cross-app paste
         try:
-            img = canvas.active_layer.get_image()
-        except: return False
-        
-        mask = ClipboardUtils.get_selection_mask(canvas)
-        if mask:
-            # Alpha-weighted extraction for feathered masks
-            mask_arr = np.array(mask, dtype=np.float32) / 255.0
-            img_arr = np.array(img, dtype=np.float32)
-            res_arr = img_arr.copy()
-            res_arr[..., 3] *= mask_arr
-            res = Image.fromarray(res_arr.clip(0, 255).astype(np.uint8), "RGBA")
-            bbox = mask.getbbox()
-            if bbox: res = res.crop(bbox)
-            img = res
-            
-        try:
-            if img.mode != "RGBA": img = img.convert("RGBA")
+            if res.mode != "RGBA":
+                res = res.convert("RGBA")
             bio = io.BytesIO()
-            img.save(bio, "PNG")
+            res.save(bio, "PNG")
             qimg = QImage.fromData(bio.getvalue())
             QApplication.clipboard().setImage(qimg)
-            return True
-        except: return False
+        except:
+            pass
 
+        canvas.update()
+        return True
+
+    # ------------------------------------------------------------------- cut
     @staticmethod
     def cut(canvas):
-        # Relaxed check for PaintLayer to allow cutting from active paint layer
         if not canvas.active_layer or canvas.active_layer.__class__.__name__ == 'GroupLayer':
             return ClipboardUtils.copy(canvas)
-            
-        ClipboardUtils.copy(canvas)
+
+        tool = canvas.active_tool
+        floating = (tool and hasattr(tool, 'floating_items') and tool.floating_items)
+
+        if floating:
+            # Floating overlay exists — copy its content then discard it.
+            # copy() already discards floating items and restores snapshots.
+            ClipboardUtils.copy(canvas)
+            canvas._clip_was_cut = True
+            canvas.update()
+            return True
+
+        # Normal path: no floating items — grab mask before copy clears it
         mask = ClipboardUtils.get_selection_mask(canvas)
+
+        ClipboardUtils.copy(canvas)
+        canvas._clip_was_cut = True
+
+        # Erase selected area from layer
+        if mask is None:
+            path = canvas._clip_path
+            if path and not path.isEmpty():
+                mask = ClipboardUtils._rasterize_mask_from_path(
+                    path, canvas.doc_width, canvas.doc_height)
+
         old_img = canvas.active_layer.get_image()
-        
         if mask:
-            # Use alpha-weighted removal so feathered masks blend correctly
             mask_arr = np.array(mask, dtype=np.float32) / 255.0
             img_arr = np.array(old_img, dtype=np.float32)
             img_arr[..., 3] *= (1.0 - mask_arr)
             new_img = Image.fromarray(img_arr.clip(0, 255).astype(np.uint8), "RGBA")
         else:
-            new_img = Image.new("RGBA", old_img.size, (0,0,0,0))
-        
+            new_img = Image.new("RGBA", old_img.size, (0, 0, 0, 0))
+
         cmd = PaintCommand(canvas.active_layer, old_img, new_img)
         canvas.undo_stack.push(cmd)
         canvas.active_layer.load_from_image(new_img)
-        
-        if hasattr(canvas, 'selection_path'):
-            canvas.selection_path = QPainterPath()
         canvas.update()
         return True
 
+    # ----------------------------------------------------------------- paste
     @staticmethod
-    def paste(canvas):
-        clipboard = QApplication.clipboard()
-        mime_data = clipboard.mimeData()
-        if not mime_data.hasImage(): return
-        
-        qimg = clipboard.image()
-        if qimg.isNull(): return
-        
-        buffer = QBuffer()
-        buffer.open(QIODevice.OpenModeFlag.ReadWrite)
-        qimg.save(buffer, "PNG")
-        pil_img = Image.open(io.BytesIO(bytes(buffer.data()))).convert("RGBA")
-        width, height = pil_img.size
-        
-        cursor_pos = canvas.mapFromGlobal(QCursor.pos())
-        
-        if not canvas.rect().contains(cursor_pos):
-            QMessageBox.warning(canvas, "Paste Error", "Cannot paste outside the canvas area.\nPlease move mouse over canvas.")
-            return
+    def paste(canvas, at_position=None):
+        """Paste as a floating selection on the active SelectionTool.
 
-        paste_x = int((cursor_pos.x() - canvas.offset.x()) / canvas.zoom - width / 2)
-        paste_y = int((cursor_pos.y() - canvas.offset.y()) / canvas.zoom - height / 2)
+        Parameters
+        ----------
+        at_position : QPointF | None
+            If given, place the top-left of the pasted image at this
+            *document-space* coordinate.  Otherwise use the original offset
+            (cut) or a slight duplicate-offset (copy).
+        """
+        clip_img = getattr(canvas, '_clip_image', None)
 
-        if canvas.active_layer and canvas.active_layer.__class__.__name__ == 'PaintLayer':
-            target_layer = canvas.active_layer
-            old_img = target_layer.get_image()
-            new_img = old_img.copy()
-            new_img.paste(pil_img, (paste_x, paste_y), pil_img)
-            
-            cmd = PaintCommand(target_layer, old_img, new_img)
-            canvas.undo_stack.push(cmd)
-            target_layer.load_from_image(new_img)
+        # Fallback: try system clipboard (e.g. paste from external app)
+        if clip_img is None:
+            clipboard = QApplication.clipboard()
+            if not clipboard.mimeData().hasImage():
+                return
+            qimg = clipboard.image()
+            if qimg.isNull():
+                return
+            buffer = QBuffer()
+            buffer.open(QIODevice.OpenModeFlag.ReadWrite)
+            qimg.save(buffer, "PNG")
+            clip_img = Image.open(io.BytesIO(bytes(buffer.data()))).convert("RGBA")
+            canvas._clip_image = clip_img
+            canvas._clip_offset = (0, 0)
+            canvas._clip_path = QPainterPath()
+            canvas._clip_feather = None
+            canvas._clip_was_cut = False
+
+        was_cut = getattr(canvas, '_clip_was_cut', False)
+        orig_offset = getattr(canvas, '_clip_offset', (0, 0))
+
+        # Determine paste position
+        if at_position is not None:
+            px = int(at_position.x())
+            py = int(at_position.y())
+        elif was_cut:
+            # Keyboard cut-paste → exact original position
+            px, py = orig_offset
         else:
-            new_layer = PaintLayer(canvas.doc_width, canvas.doc_height, name="Pasted Layer")
-            full_img = Image.new("RGBA", (canvas.doc_width, canvas.doc_height), (0,0,0,0))
-            full_img.paste(pil_img, (paste_x, paste_y))
-            new_layer.load_from_image(full_img)
-            
-            target_parent = canvas.root
-            if canvas.active_layer:
-                p = canvas.active_layer
-                while p.parent and p.parent.__class__.__name__ != 'GroupLayer' and p.parent != canvas.root:
-                    p = p.parent
-                target_parent = p.parent if p.parent else canvas.root
-            target_parent.add_child(new_layer)
-            canvas.active_layer = new_layer
-            canvas.layer_structure_changed.emit()
+            # Keyboard copy-paste → nudge 10 px right-down
+            px, py = orig_offset[0] + 10, orig_offset[1] + 10
+
+        # Build a selection path (rect) around the pasted region
+        cw, ch = clip_img.size
+        sel_path = QPainterPath()
+        sel_path.addRect(QRectF(px, py, cw, ch))
+
+        # Convert pasted image to QImage for floating overlay
+        bio = io.BytesIO()
+        clip_img.save(bio, "PNG")
+        qimg_float = QImage.fromData(bio.getvalue())
+
+        # If the active tool is a SelectionTool, inject the floating overlay
+        tool = canvas.active_tool
+        if tool and hasattr(tool, 'floating_items'):
+            # Commit any previous floating transform first
+            tool.commit_transform()
+
+            tool.tf_pos = QPointF(px, py)
+            tool.tf_rotation = 0.0
+            tool.tf_scale = QPointF(1.0, 1.0)
+            tool.base_path = QPainterPath()
+            tool.base_path.addRect(QRectF(0, 0, cw, ch))
+
+            canvas.selection_path = sel_path
+            canvas.selection_feather_mask = None
+
+            layer = canvas.active_layer
+            if layer and layer.__class__.__name__ == 'PaintLayer':
+                tool.floating_items = [{
+                    'layer': layer,
+                    'qimg': qimg_float,
+                    'snapshot': layer.get_image().copy(),
+                }]
+            tool.state = tool.STATE_IDLE
+        else:
+            # No selection tool active → merge directly (legacy path)
+            if canvas.active_layer and canvas.active_layer.__class__.__name__ == 'PaintLayer':
+                target = canvas.active_layer
+                old_img = target.get_image()
+                new_img = old_img.copy()
+                new_img.paste(clip_img, (px, py), clip_img)
+                cmd = PaintCommand(target, old_img, new_img)
+                canvas.undo_stack.push(cmd)
+                target.load_from_image(new_img)
 
         canvas.update()
 
@@ -426,7 +563,7 @@ class SelectionTool(Tool):
     # --- Interaction ---
     def mouse_press(self, event, pos, layer_pos):
         if event.button() == Qt.MouseButton.RightButton:
-            self.show_context_menu(event.globalPosition().toPoint())
+            self.show_context_menu(event.globalPosition().toPoint(), doc_pos=layer_pos)
             return True
 
         if event.button() == Qt.MouseButton.LeftButton:
@@ -532,15 +669,77 @@ class SelectionTool(Tool):
         self.state = self.STATE_IDLE
         self.canvas.update()
 
-    def show_context_menu(self, global_pos):
+    def show_context_menu(self, global_pos, doc_pos=None):
         menu = QMenu(self.canvas)
         menu.addAction("Cut", lambda: ClipboardUtils.cut(self.canvas)).setEnabled(self.has_selection())
         menu.addAction("Copy", lambda: ClipboardUtils.copy(self.canvas)).setEnabled(self.has_selection())
-        menu.addAction("Paste", lambda: ClipboardUtils.paste(self.canvas))
+        paste_pos = QPointF(doc_pos.x(), doc_pos.y()) if doc_pos else None
+        can_paste = QApplication.clipboard().mimeData().hasImage() or getattr(self.canvas, '_clip_image', None) is not None
+        act_paste = menu.addAction("Paste", lambda: ClipboardUtils.paste(self.canvas, at_position=paste_pos))
+        act_paste.setEnabled(can_paste)
+        menu.addSeparator()
+        act_del_rest = menu.addAction("Delete Rest", lambda: self._delete_rest())
+        act_del_rest.setEnabled(self.has_selection() and self.canvas.active_layer is not None)
         menu.addSeparator()
         menu.addAction("Rotate Left 90", lambda: self._menu_tf(-90)).setEnabled(self.has_selection())
         menu.addAction("Rotate Right 90", lambda: self._menu_tf(90)).setEnabled(self.has_selection())
+        menu.addSeparator()
+        has_layer = self.canvas.active_layer is not None
+        if self.has_selection():
+            act_wanx = menu.addAction("🎨 Edit With Wanx-Imageedit", lambda: self._trigger_wanx_inpaint())
+            act_wanx.setEnabled(has_layer)
+        else:
+            act_qwen = menu.addAction("✨ Edit With Qwen-Imageedit", lambda: self._trigger_qwen_edit())
+            act_qwen.setEnabled(has_layer)
         menu.exec(global_pos)
+
+    def _trigger_wanx_inpaint(self):
+        """Delegate to canvas for Wanx inpaint (with mask)."""
+        if hasattr(self.canvas, 'start_wanx_inpaint'):
+            self.canvas.start_wanx_inpaint()
+
+    def _trigger_qwen_edit(self):
+        """Delegate to canvas for Qwen image edit (no mask)."""
+        if hasattr(self.canvas, 'start_qwen_edit'):
+            self.canvas.start_qwen_edit()
+
+    def _delete_rest(self):
+        """Delete everything OUTSIDE the selection (make unselected area transparent).
+        
+        Respects feathered masks: feathered pixels get proportionally transparent.
+        After applying, the feather mask is cleared so that subsequent lift/drag
+        operations use the hard-edge selection path and don't leave ghost outlines.
+        """
+        if not self.has_selection():
+            return
+        layer = self.canvas.active_layer
+        if not layer or layer.__class__.__name__ != 'PaintLayer':
+            return
+
+        self.canvas.makeCurrent()
+        mask = ClipboardUtils.get_selection_mask(self.canvas)
+        if mask is None:
+            return
+
+        old_img = layer.get_image()
+        mask_arr = np.array(mask, dtype=np.float32) / 255.0  # 0..1
+        img_arr = np.array(old_img, dtype=np.float32)
+
+        # Keep only the selected area: multiply alpha by the mask
+        img_arr[..., 3] *= mask_arr
+        new_img = Image.fromarray(img_arr.clip(0, 255).astype(np.uint8), "RGBA")
+
+        cmd = PaintCommand(layer, old_img, new_img)
+        self.canvas.undo_stack.push(cmd)
+        layer.load_from_image(new_img)
+
+        # Clear the feather gradient mask so the next _lift_selection uses
+        # the hard-edge QPainterPath mask (binary 0/255).  This prevents
+        # double-application of the feather producing ghost outlines.
+        if hasattr(self.canvas, 'selection_feather_mask'):
+            self.canvas.selection_feather_mask = None
+
+        self.canvas.update()
 
     def _menu_tf(self, angle):
         self._lift_selection()

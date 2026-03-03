@@ -71,12 +71,20 @@ class BrushPanel(QWidget):
         brush = item.data(0, Qt.ItemDataRole.UserRole)
         if isinstance(brush, BrushConfig):
             self.on_brush_selected(brush)
+            # Notify the sibling tools panel to clear its pressed state
+            if hasattr(self, '_on_brush_activated_cb') and self._on_brush_activated_cb:
+                self._on_brush_activated_cb()
+
+    def clear_selection(self):
+        """Deselect all items in the brush tree (called when a tool is selected)."""
+        self.tree.clearSelection()
 
 class ToolsPanel(QWidget):
     def __init__(self, on_tool_selected):
         super().__init__()
         self.on_tool_selected = on_tool_selected
         self._active_tool_name = None
+        self._tool_buttons = {}  # name -> QPushButton
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
         
@@ -95,15 +103,20 @@ class ToolsPanel(QWidget):
             ("Text", " T ")
         ]
         
+        _normal_style = (
+            "QPushButton { text-align: left; padding-left: 20px; font-family: monospace; font-size: 13px; }"
+            "QPushButton:hover { background-color: #e0e0e0; }"
+            "QPushButton:checked { background-color: #c0d8f0; border: 1px solid #6aa0d0; }"
+        )
+        
         for name, icon in tools:
             btn = QPushButton(f"{icon}  {name}")
             btn.setMinimumHeight(45)
-            btn.setStyleSheet("""
-                QPushButton { text-align: left; padding-left: 20px; font-family: monospace; font-size: 13px; }
-                QPushButton:hover { background-color: #e0e0e0; }
-            """)
+            btn.setStyleSheet(_normal_style)
+            btn.setCheckable(True)
             btn.clicked.connect(lambda checked, n=name: self._on_tool_btn_clicked(n))
             layout.addWidget(btn)
+            self._tool_buttons[name] = btn
 
         # === Magic Wand Options Panel (hidden by default) ===
         self.wand_panel = QGroupBox("🪄 AI Wand Options")
@@ -197,8 +210,23 @@ class ToolsPanel(QWidget):
 
     def _on_tool_btn_clicked(self, name):
         self._active_tool_name = name
+        self._set_active_button(name)
         self.wand_panel.setVisible(name == "Magic Wand")
+        # Notify sibling brush panel to clear its selection
+        if hasattr(self, '_on_tool_activated_cb') and self._on_tool_activated_cb:
+            self._on_tool_activated_cb()
         self.on_tool_selected(name)
+
+    def _set_active_button(self, name):
+        """Highlight only the given tool button (uncheck all others)."""
+        for btn_name, btn in self._tool_buttons.items():
+            btn.setChecked(btn_name == name)
+
+    def clear_active_button(self):
+        """Uncheck all tool buttons (called when a brush is selected)."""
+        self._active_tool_name = None
+        for btn in self._tool_buttons.values():
+            btn.setChecked(False)
 
     def _on_wand_mode_changed(self, id, checked):
         if checked and self._magic_wand_tool:
@@ -222,6 +250,7 @@ class ToolsPanel(QWidget):
             # Hide wand panel since tool auto-switched to Rect Select
             self.wand_panel.setVisible(False)
             self._active_tool_name = "Rect Select"
+            self._set_active_button("Rect Select")
 
     def _on_feather_changed(self, value):
         """Live-update the feather value on the tool and refresh the mask overlay."""
@@ -282,6 +311,10 @@ class LeftSidebar(QWidget):
         self.tools_panel = ToolsPanel(self._on_tool_selected_wrapper)
         layout.addWidget(self.tools_panel, 1)
 
+        # Cross-wire brush ↔ tool pressed-state exclusion
+        self.brush_panel._on_brush_activated_cb = self._on_brush_activated
+        self.tools_panel._on_tool_activated_cb = self._on_tool_activated
+
         self._add_divider(layout)
 
         self.ai_panel = AIPanel()
@@ -301,9 +334,19 @@ class LeftSidebar(QWidget):
         else:
             self.tools_panel.set_magic_wand_tool_ref(None)
 
+    def _on_brush_activated(self):
+        """Called when a brush is clicked — clear tool pressed state."""
+        self.tools_panel.clear_active_button()
+        self.tools_panel.wand_panel.setVisible(False)
+
+    def _on_tool_activated(self):
+        """Called when a tool is clicked — clear brush tree selection."""
+        self.brush_panel.clear_selection()
+
     def _on_tool_auto_switched(self, tool_name):
         """Called when a tool (e.g. MagicWand) auto-switches to another tool."""
         self.tools_panel._active_tool_name = tool_name
+        self.tools_panel._set_active_button(tool_name)
         self.tools_panel.wand_panel.setVisible(tool_name == "Magic Wand")
         self.tools_panel.set_magic_wand_tool_ref(None)
 
@@ -460,6 +503,9 @@ class LayerPanel(QWidget):
         if isinstance(node, PaintLayer):
             action_gradient = menu.addAction("Gradient Map...")
             action_gradient.triggered.connect(lambda: self._open_gradient_map(node))
+
+            action_rm_white = menu.addAction("Auto Remove White Background")
+            action_rm_white.triggered.connect(lambda: self._remove_white_bg(node))
             
         menu.exec(self.tree.viewport().mapToGlobal(position))
 
@@ -471,6 +517,22 @@ class LayerPanel(QWidget):
         # Delegate to Central Canvas Logic
         if hasattr(self.canvas, 'gl_canvas'):
             self.canvas.gl_canvas.open_gradient_map()
+
+    def _remove_white_bg(self, layer):
+        """Remove white background from a layer using edge flood-fill."""
+        from src.core.processor import remove_white_background
+
+        gl = self.canvas.gl_canvas if hasattr(self.canvas, 'gl_canvas') else self.canvas
+        gl.makeCurrent()
+
+        old_img = layer.get_image()
+        new_img = remove_white_background(old_img)
+
+        cmd = PaintCommand(layer, old_img, new_img)
+        gl.undo_stack.push(cmd)
+        layer.load_from_image(new_img)
+        self.canvas.update()
+        self.refresh()  # update thumbnail
 
     def _on_opacity_change(self, value):
         opacity = value / 100.0
