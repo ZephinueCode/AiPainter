@@ -15,14 +15,19 @@ from src.gui.dialogs import GradientMapDialog, AdjustmentDialog
 import os
 import uuid
 import io
-from pytoshop.user import nested_layers
-from pytoshop import enums
 import pytoshop
 import packbits
-import pytoshop.core
-import pytoshop.layers
+
 pytoshop.core.packbits = packbits
 pytoshop.layers.packbits = packbits
+
+from pytoshop.user import nested_layers
+from pytoshop import enums
+import pytoshop.core
+import pytoshop.layers
+
+import sys
+sys.modules['packbits'] = packbits
 
 
 class GLCanvas(QOpenGLWidget):
@@ -94,7 +99,7 @@ class GLCanvas(QOpenGLWidget):
         
         # Clear selection when switching away from selection tools
         # (selection is only kept when switching between Rect Select / Lasso)
-        selection_tools = {"Rect Select", "Lasso"}
+        selection_tools = {"Rect Select", "Lasso", "Magic Wand"}
         if tool_name not in selection_tools:
             self.selection_path = QPainterPath()
             self.selection_feather_mask = None
@@ -184,15 +189,7 @@ class GLCanvas(QOpenGLWidget):
         self._render_node(self.root)
         
         glDisable(GL_TEXTURE_2D)
-        glColor3f(0,0,0)
-        glLineWidth(2)
-        glBegin(GL_LINE_LOOP)
-        glVertex2f(0, 0)
-        glVertex2f(0, self.doc_height)
-        glVertex2f(self.doc_width, self.doc_height)
-        glVertex2f(self.doc_width, 0)
-        glEnd()
-
+            
     def paintEvent(self, event):
         super().paintEvent(event)
         
@@ -207,7 +204,7 @@ class GLCanvas(QOpenGLWidget):
                 self.active_tool.draw_overlay(painter)
                 painter.restore()
         else:
-            # No active tool (e.g. brush mode) – draw only basic dashed border, no handles
+            painter.save()
             painter.translate(self.offset)
             painter.scale(self.zoom, self.zoom)
             if not self.selection_path.isEmpty():
@@ -219,6 +216,26 @@ class GLCanvas(QOpenGLWidget):
                 painter.drawPath(self.selection_path)
                 pen.setColor(Qt.GlobalColor.black); pen.setDashOffset(5)
                 painter.setPen(pen); painter.drawPath(self.selection_path)
+            painter.restore()
+
+        # 文档边界框 — 始终绘制在最顶层
+        painter.save()
+        painter.translate(self.offset)
+        painter.scale(self.zoom, self.zoom)
+        doc_rect = QRectF(0, 0, self.doc_width, self.doc_height)
+        if not self.selection_path.isEmpty():
+            # 有选区时：灰色虚线边框
+            pen = QPen(QColor(100, 100, 100, 200), 2, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+        else:
+            # 无选区时：黑色实线边框
+            pen = QPen(QColor(0, 0, 0), 2, Qt.PenStyle.SolidLine)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(doc_rect)
+        painter.restore()
             
         painter.end()
 
@@ -243,17 +260,6 @@ class GLCanvas(QOpenGLWidget):
             glTexCoord2f(1, 1); glVertex2f(node.width, 0)
             glEnd()
             glDisable(GL_TEXTURE_2D)
-            if hasattr(self, 'active_layer') and node == self.active_layer:
-                glDisable(GL_TEXTURE_2D)
-                glColor4f(0.0, 0.6, 1.0, 1.0) # 亮蓝色
-                glLineWidth(20.0)
-                glBegin(GL_LINE_LOOP)
-                glVertex2f(0, 0)
-                glVertex2f(node.width, 0)
-                glVertex2f(node.width, node.height)
-                glVertex2f(0, node.height)
-                glEnd()
-                glEnable(GL_TEXTURE_2D)
         glPopMatrix()
 
     def _get_parent_opacity(self, node):
@@ -331,7 +337,31 @@ class GLCanvas(QOpenGLWidget):
 
     def keyPressEvent(self, event):
         ctrl = event.modifiers() & Qt.KeyboardModifier.ControlModifier
-        
+
+        # ── Helper: auto-commit Magic Wand selection if not yet applied ──
+        def _ensure_magic_wand_committed():
+            """If the active tool is MagicWandTool and selection_path is still
+            empty, automatically apply the wand result as a selection so that
+            copy/cut/delete can work immediately after clicking."""
+            if (self.active_tool
+                    and isinstance(self.active_tool, MagicWandTool)
+                    and self.selection_path.isEmpty()):
+                self.active_tool.apply_as_selection(
+                    feather=self.active_tool.feather
+                )
+
+        # ── Magic Wand specific keys (Enter to confirm, Ctrl+Z to undo point) ──
+        if self.active_tool and isinstance(self.active_tool, MagicWandTool):
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.active_tool.apply_as_selection(feather=self.active_tool.feather)
+                self.update()
+                return
+            elif ctrl and event.key() == Qt.Key.Key_Z:
+                self.active_tool.undo_last_point()
+                self.update()
+                return
+
+        # ── Delete / Backspace ──
         if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
             # If there's a floating selection, discard it (restore layer snapshot)
             tool = self.active_tool
@@ -344,34 +374,26 @@ class GLCanvas(QOpenGLWidget):
                 self.update()
                 return
 
+            # Auto-commit Magic Wand before checking selection
+            _ensure_magic_wand_committed()
+
             if not self.selection_path.isEmpty():
                 if self.active_layer and isinstance(self.active_layer, PaintLayer):
                     mask = ClipboardUtils.get_selection_mask(self)
                     if mask:
                         old_img = self.active_layer.get_image()
-                        # Alpha-weighted removal for feathered masks
                         mask_arr = np.array(mask, dtype=np.float32) / 255.0
                         img_arr = np.array(old_img, dtype=np.float32)
                         img_arr[..., 3] *= (1.0 - mask_arr)
                         new_img = Image.fromarray(img_arr.clip(0, 255).astype(np.uint8), "RGBA")
-                        
+
                         cmd = PaintCommand(self.active_layer, old_img, new_img)
                         self.undo_stack.push(cmd)
                         self.active_layer.load_from_image(new_img)
                         self.update()
             return
 
-        # Magic Wand: Enter applies selection, Ctrl+Z undoes last point
-        if self.active_tool and isinstance(self.active_tool, MagicWandTool):
-            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                self.active_tool.apply_as_selection(feather=self.active_tool.feather)
-                self.update()
-                return
-            elif ctrl and event.key() == Qt.Key.Key_Z:
-                self.active_tool.undo_last_point()
-                self.update()
-                return
-
+        # ── Escape ──
         if event.key() == Qt.Key.Key_Escape:
             if self.active_tool and hasattr(self.active_tool, 'deactivate'):
                 self.active_tool.deactivate()
@@ -379,23 +401,39 @@ class GLCanvas(QOpenGLWidget):
                 self.selection_path = QPainterPath()
                 self.selection_feather_mask = None
             self.update()
-            
-        elif ctrl and event.key() == Qt.Key.Key_Z:
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier: self.undo_stack.redo()
-            else: self.undo_stack.undo()
+            return
+
+        # ── Undo / Redo ──
+        if ctrl and event.key() == Qt.Key.Key_Z:
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.undo_stack.redo()
+            else:
+                self.undo_stack.undo()
             self.update()
-        elif ctrl and event.key() == Qt.Key.Key_Y:
+            return
+        if ctrl and event.key() == Qt.Key.Key_Y:
             self.undo_stack.redo()
             self.update()
-            
-        elif ctrl and event.key() == Qt.Key.Key_C:
+            return
+
+        # ── Copy (Ctrl+C) ──
+        if ctrl and event.key() == Qt.Key.Key_C:
+            _ensure_magic_wand_committed()
             ClipboardUtils.copy(self)
-        elif ctrl and event.key() == Qt.Key.Key_X:
+            return
+
+        # ── Cut (Ctrl+X) ──
+        if ctrl and event.key() == Qt.Key.Key_X:
+            _ensure_magic_wand_committed()
             ClipboardUtils.cut(self)
-        elif ctrl and event.key() == Qt.Key.Key_V:
+            return
+
+        # ── Paste (Ctrl+V) ──
+        if ctrl and event.key() == Qt.Key.Key_V:
             ClipboardUtils.paste(self)
-        else:
-            super().keyPressEvent(event)
+            return
+
+        super().keyPressEvent(event)
 
     def show_default_context_menu(self, event):
         menu = QMenu(self)

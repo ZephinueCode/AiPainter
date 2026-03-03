@@ -519,12 +519,9 @@ class GeneratorStatusWidget(QFrame):
         self.adjustSize()
 
     def show_error(self, msg):
-        self.lbl_title.setText("Error")
-        self.lbl_preview.clear()
-        self.lbl_preview.setText("Failed")
-        self.lbl_info.setText(msg)
-        self.btn_container.hide()
-        self.adjustSize()
+        from PyQt6.QtWidgets import QMessageBox
+        self.hide()
+        QMessageBox.warning(self, "AI Generation Error", msg)
 
     def reset_state(self):
         self.hide()

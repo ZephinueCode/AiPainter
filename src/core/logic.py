@@ -323,3 +323,57 @@ class ProjectLogic:
             group.add_child(layer)
             
         return group
+    
+    @staticmethod
+    def merge_layers(layers, doc_width, doc_height, name="Merged Layer"):
+        """
+        Merge multiple PaintLayers into a single PaintLayer.
+        Layers are composited in list order (first = bottom, last = top).
+        Returns a new PaintLayer with the merged result.
+        """
+        # Create transparent base canvas
+        merged = Image.new("RGBA", (doc_width, doc_height), (0, 0, 0, 0))
+
+        for layer in layers:
+            if not isinstance(layer, PaintLayer):
+                continue
+            if not layer.visible:
+                continue
+
+            layer_img = layer.get_image()
+            if layer_img.mode != "RGBA":
+                layer_img = layer_img.convert("RGBA")
+
+            # Apply layer opacity
+            if layer.opacity < 1.0:
+                # Scale alpha channel by opacity
+                arr = np.array(layer_img, dtype=np.float32)
+                arr[..., 3] *= layer.opacity
+                layer_img = Image.fromarray(arr.clip(0, 255).astype(np.uint8), "RGBA")
+
+            # Alpha composite (standard Photoshop-like "Normal" blending)
+            merged = Image.alpha_composite(merged, layer_img)
+
+        # Create new PaintLayer with result
+        result = PaintLayer(doc_width, doc_height, name)
+        result.uuid = str(uuid.uuid4())
+        result.load_from_image(merged)
+        return result
+
+    @staticmethod
+    def merge_group(group, doc_width, doc_height):
+        """
+        Flatten all PaintLayers inside a GroupLayer (recursively) into one PaintLayer.
+        """
+        flat_layers = []
+
+        def collect(node):
+            if isinstance(node, PaintLayer) and node.visible:
+                flat_layers.append(node)
+            elif isinstance(node, GroupLayer):
+                for child in node.children:
+                    collect(child)
+
+        collect(group)
+        merged_name = f"{group.name} (Merged)"
+        return ProjectLogic.merge_layers(flat_layers, doc_width, doc_height, merged_name)

@@ -226,7 +226,7 @@ class QwenEditThread(QThread):
 
             response = MultiModalConversation.call(
                 api_key=manager.api_key,
-                model="qwen-image-edit-plus",
+                model="qwen-image-2.0",
                 messages=messages,
                 stream=False,
                 n=1,

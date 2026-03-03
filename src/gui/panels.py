@@ -413,11 +413,16 @@ class LayerPanel(QWidget):
         btn_layout = QHBoxLayout()
         self.btn_add = QPushButton("Layer")
         self.btn_group = QPushButton("Group")
+        self.btn_merge = QPushButton("Merge")
         self.btn_del = QPushButton("Del")
         self.btn_add.clicked.connect(self._add_layer)
         self.btn_group.clicked.connect(self._add_group)
+        self.btn_merge.clicked.connect(self._merge_layers)
         self.btn_del.clicked.connect(self._del_node)
-        btn_layout.addWidget(self.btn_add); btn_layout.addWidget(self.btn_group); btn_layout.addWidget(self.btn_del)
+        btn_layout.addWidget(self.btn_add)
+        btn_layout.addWidget(self.btn_group)
+        btn_layout.addWidget(self.btn_merge)
+        btn_layout.addWidget(self.btn_del)
         layout.addLayout(btn_layout)
 
     def _update_item_thumbnail(self, item):
@@ -506,6 +511,22 @@ class LayerPanel(QWidget):
 
             action_rm_white = menu.addAction("Auto Remove White Background")
             action_rm_white.triggered.connect(lambda: self._remove_white_bg(node))
+
+            menu.addSeparator()
+            action_merge_down = menu.addAction("Merge Down")
+            action_merge_down.triggered.connect(lambda: self._merge_down(node))
+            # Disable if this is the bottom-most layer
+            parent = node.parent if node.parent else self.canvas.root
+            idx = parent.children.index(node) if node in parent.children else -1
+            action_merge_down.setEnabled(idx > 0)
+
+        elif isinstance(node, GroupLayer) and node != self.canvas.root:
+            action_flatten_group = menu.addAction("Flatten Group")
+            action_flatten_group.triggered.connect(lambda: self._flatten_group(node))
+
+        menu.addSeparator()
+        action_merge_visible = menu.addAction("Merge All Visible")
+        action_merge_visible.triggered.connect(self._merge_all_visible)
             
         menu.exec(self.tree.viewport().mapToGlobal(position))
 
@@ -649,6 +670,135 @@ class LayerPanel(QWidget):
             self.canvas.active_layer = None
             self.canvas.layer_structure_changed.emit()
             self.canvas.update()
+
+    def _merge_layers(self):
+        """Button handler: smart merge based on what's selected."""
+        curr = self.tree.currentItem()
+        if not curr:
+            QMessageBox.warning(self, "Merge", "Please select a layer or group.")
+            return
+
+        node = curr.data(0, Qt.ItemDataRole.UserRole)
+
+        if isinstance(node, GroupLayer) and node != self.canvas.root:
+            self._flatten_group(node)
+        elif isinstance(node, PaintLayer):
+            self._merge_down(node)
+        else:
+            QMessageBox.information(self, "Merge", "Select a Paint Layer (merge down)\nor a Group (flatten group).")
+
+    def _merge_down(self, layer):
+        """Merge the given PaintLayer with the layer directly below it."""
+        from src.core.logic import ProjectLogic
+
+        parent = layer.parent if layer.parent else self.canvas.root
+        if layer not in parent.children:
+            return
+
+        idx = parent.children.index(layer)
+        if idx <= 0:
+            QMessageBox.warning(self, "Merge Down", "No layer below to merge with.")
+            return
+
+        below = parent.children[idx - 1]
+        if not isinstance(below, PaintLayer):
+            QMessageBox.warning(self, "Merge Down", "The layer below is not a Paint Layer.\nUse 'Flatten Group' instead.")
+            return
+
+        gl = self.canvas.gl_canvas if hasattr(self.canvas, 'gl_canvas') else self.canvas
+        gl.makeCurrent()
+
+        # Merge: below (bottom) + layer (top)
+        merged = ProjectLogic.merge_layers(
+            [below, layer],
+            self.canvas.doc_width,
+            self.canvas.doc_height,
+            name=layer.name
+        )
+
+        # Replace in tree: remove both, insert merged at same position
+        parent.remove_child(layer)
+        parent.remove_child(below)
+        # Insert at the position where 'below' was
+        parent.children.insert(min(idx - 1, len(parent.children)), merged)
+        merged.parent = parent
+
+        self.canvas.active_layer = merged
+        self.canvas.layer_structure_changed.emit()
+        self.canvas.update()
+
+    def _flatten_group(self, group):
+        """Flatten a GroupLayer into a single PaintLayer."""
+        from src.core.logic import ProjectLogic
+
+        gl = self.canvas.gl_canvas if hasattr(self.canvas, 'gl_canvas') else self.canvas
+        gl.makeCurrent()
+
+        merged = ProjectLogic.merge_group(
+            group,
+            self.canvas.doc_width,
+            self.canvas.doc_height
+        )
+
+        parent = group.parent if group.parent else self.canvas.root
+        if group in parent.children:
+            idx = parent.children.index(group)
+            parent.remove_child(group)
+            parent.children.insert(idx, merged)
+            merged.parent = parent
+        else:
+            parent.add_child(merged)
+
+        self.canvas.active_layer = merged
+        self.canvas.layer_structure_changed.emit()
+        self.canvas.update()
+
+    def _merge_all_visible(self):
+        """Merge all visible layers into a single new layer."""
+        from src.core.logic import ProjectLogic
+
+        gl = self.canvas.gl_canvas if hasattr(self.canvas, 'gl_canvas') else self.canvas
+        gl.makeCurrent()
+
+        # Collect all visible PaintLayers in render order
+        visible_layers = []
+
+        def collect_visible(node):
+            if not node.visible:
+                return
+            if isinstance(node, PaintLayer):
+                visible_layers.append(node)
+            elif isinstance(node, GroupLayer):
+                for child in node.children:
+                    collect_visible(child)
+
+        collect_visible(self.canvas.root)
+
+        if not visible_layers:
+            QMessageBox.warning(self, "Merge Visible", "No visible layers found.")
+            return
+
+        if len(visible_layers) < 2:
+            QMessageBox.information(self, "Merge Visible", "Need at least 2 visible layers to merge.")
+            return
+
+        merged = ProjectLogic.merge_layers(
+            visible_layers,
+            self.canvas.doc_width,
+            self.canvas.doc_height,
+            name="Merged Visible"
+        )
+
+        # Remove all original visible layers from their parents
+        for layer in visible_layers:
+            if layer.parent:
+                layer.parent.remove_child(layer)
+
+        # Add merged layer to root
+        self.canvas.root.add_child(merged)
+        self.canvas.active_layer = merged
+        self.canvas.layer_structure_changed.emit()
+        self.canvas.update()
 
 class PropertyPanel(QWidget):
     def __init__(self, canvas):

@@ -2,7 +2,7 @@
 
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QSpinBox, 
                              QDialogButtonBox, QTabWidget, QWidget, QDoubleSpinBox, 
-                             QLabel, QGridLayout, QPushButton, QButtonGroup, 
+                             QLabel, QGridLayout, QToolButton, QPushButton, QButtonGroup, 
                              QLineEdit, QMessageBox, QTextEdit, QHBoxLayout, QApplication, QSlider)
 from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QPixmap, QImage
@@ -435,29 +435,27 @@ class SizeCyclerWidget(QWidget):
         
         # Value Input (Editable)
         self.spin_val = QSpinBox()
-        self.spin_val.setRange(64, 4096) 
+        self.spin_val.setRange(64, 4096)
         self.spin_val.setSingleStep(32)
         self.spin_val.setValue(self.options[self.current_idx])
-        self.spin_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.spin_val.setFixedWidth(120) 
+        self.spin_val.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.spin_val.setFixedWidth(90)  # ← 缩短总宽度，箭头按钮占比更合理
         self.spin_val.setStyleSheet("""
             QSpinBox {
-                background-color: white; 
-                border: 1px solid #ccc; 
-                border-radius: 3px; 
-                padding: 3px;
+                background-color: white;
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                padding: 2px;
                 font-weight: bold;
+            }
+            QSpinBox::up-button {
+                width: 20px;
+            }
+            QSpinBox::down-button {
+                width: 20px;
             }
         """)
         layout.addWidget(self.spin_val)
-        
-        # Vertical Buttons Container
-        btn_container = QWidget()
-        v_layout = QVBoxLayout(btn_container)
-        v_layout.setContentsMargins(0,0,0,0)
-        v_layout.setSpacing(0)
-        
-        layout.addWidget(btn_container)
         layout.addStretch()
 
     def next_val(self):
