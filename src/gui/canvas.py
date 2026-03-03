@@ -526,24 +526,39 @@ class GLCanvas(QOpenGLWidget):
 
     def open_img(self, path):
         try:
-
             self.makeCurrent()
-            tex_id, w, h = ProjectLogic.open_img(path)
-            if tex_id:
-                ratio = min(self.doc_width / w, self.doc_height / h)
-                display_w = int(w * ratio)
-                display_h = int(h * ratio)
-
-            # 创建新的图层对象
-                new_layer = PaintLayer(display_w, display_h, os.path.basename(path))
-                new_layer.texture = tex_id
-                new_layer.uuid = str(uuid.uuid4())
             
-            # 将其加入到图层树中
+            # Load image via PIL
+            img = Image.open(path)
+            if img.mode != "RGBA":
+                img = img.convert("RGBA")
+            w, h = img.size
+
+            # Scale to fit the canvas while preserving aspect ratio
+            ratio = min(self.doc_width / w, self.doc_height / h, 1.0)
+            display_w = int(w * ratio)
+            display_h = int(h * ratio)
+            if ratio < 1.0:
+                img = img.resize((display_w, display_h), Image.LANCZOS)
+
+            # Always create a document-sized layer so that all tools
+            # (selection, clipboard, etc.) work with consistent dimensions.
+            canvas_img = Image.new("RGBA", (self.doc_width, self.doc_height), (0, 0, 0, 0))
+            paste_x = (self.doc_width - display_w) // 2
+            paste_y = (self.doc_height - display_h) // 2
+            canvas_img.paste(img, (paste_x, paste_y))
+
+            new_layer = PaintLayer(self.doc_width, self.doc_height, os.path.basename(path))
+            new_layer.uuid = str(uuid.uuid4())
+            new_layer.load_from_image(canvas_img)
+
+            # Add to layer tree
             self.root.add_child(new_layer)
+            self.active_layer = new_layer
             self.layer_structure_changed.emit()
             self.update()
-        except Exception as e: print(e)
+        except Exception as e:
+            print(f"Error importing image: {e}")
 
     def import_psd(self, path):
         try:
