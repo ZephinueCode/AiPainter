@@ -3,7 +3,8 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QTreeWidget, QTreeWidgetItem, QListWidget, QListWidgetItem, 
                              QGroupBox, QLabel, QSlider, QInputDialog, QFrame, QGridLayout,
-                             QAbstractItemView, QMenu, QMessageBox, QSplitter, QScrollArea)
+                             QAbstractItemView, QMenu, QMessageBox, QSplitter, QScrollArea,
+                             QComboBox)
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap, QImage
 from src.gui.widgets import ColorPickerWidget, PressureCurveEditor
@@ -203,10 +204,71 @@ class ToolsPanel(QWidget):
         layout.addWidget(self.wand_panel)
         # ====================================================
 
+        # === Liquify Options Panel (hidden by default) ===
+        self.liquify_panel = QGroupBox("Liquify Options")
+        self.liquify_panel.setVisible(False)
+        liquify_layout = QVBoxLayout(self.liquify_panel)
+        liquify_layout.setContentsMargins(8, 8, 8, 8)
+        liquify_layout.setSpacing(4)
+
+        ldesc = QLabel("Drag on canvas to deform.\nAdjust params below, then Apply or Cancel.")
+        ldesc.setStyleSheet("color: #888; font-size: 10px;")
+        ldesc.setWordWrap(True)
+        liquify_layout.addWidget(ldesc)
+
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Mode:"))
+        self._liquify_mode_combo = QComboBox()
+        self._liquify_mode_combo.addItems(["Push", "Bloat", "Pucker", "Restore"])
+        self._liquify_mode_combo.currentIndexChanged.connect(self._on_liquify_mode_changed)
+        mode_row.addWidget(self._liquify_mode_combo, 1)
+        liquify_layout.addLayout(mode_row)
+
+        radius_row = QHBoxLayout()
+        radius_row.addWidget(QLabel("Radius:"))
+        self._liquify_radius_slider = QSlider(Qt.Orientation.Horizontal)
+        self._liquify_radius_slider.setRange(5, 300)
+        self._liquify_radius_slider.setValue(50)
+        self._liquify_radius_slider.valueChanged.connect(self._on_liquify_radius_changed)
+        radius_row.addWidget(self._liquify_radius_slider, 1)
+        self._liquify_radius_label = QLabel("50")
+        self._liquify_radius_label.setFixedWidth(34)
+        radius_row.addWidget(self._liquify_radius_label)
+        liquify_layout.addLayout(radius_row)
+
+        strength_row = QHBoxLayout()
+        strength_row.addWidget(QLabel("Strength:"))
+        self._liquify_strength_slider = QSlider(Qt.Orientation.Horizontal)
+        self._liquify_strength_slider.setRange(1, 100)
+        self._liquify_strength_slider.setValue(50)
+        self._liquify_strength_slider.valueChanged.connect(self._on_liquify_strength_changed)
+        strength_row.addWidget(self._liquify_strength_slider, 1)
+        self._liquify_strength_label = QLabel("50%")
+        self._liquify_strength_label.setFixedWidth(34)
+        strength_row.addWidget(self._liquify_strength_label)
+        liquify_layout.addLayout(strength_row)
+
+        lbtn_row = QHBoxLayout()
+        self._liquify_cancel_btn = QPushButton("Cancel")
+        self._liquify_cancel_btn.clicked.connect(self._on_liquify_cancel)
+        lbtn_row.addWidget(self._liquify_cancel_btn)
+        self._liquify_apply_btn = QPushButton("Apply")
+        self._liquify_apply_btn.setStyleSheet(
+            "QPushButton { background-color: #4a9eff; color: white; font-weight: bold; padding: 6px; border-radius: 3px; }"
+            "QPushButton:hover { background-color: #3a8eef; }"
+        )
+        self._liquify_apply_btn.clicked.connect(self._on_liquify_apply)
+        lbtn_row.addWidget(self._liquify_apply_btn)
+        liquify_layout.addLayout(lbtn_row)
+
+        layout.addWidget(self.liquify_panel)
+        # ================================================
+
         layout.addStretch()
 
         # Magic wand tool reference (set by LeftSidebar)
         self._magic_wand_tool = None
+        self._liquify_tool = None
 
     def set_magic_wand_tool_ref(self, tool):
         """Set the magic wand tool reference for panel interaction."""
@@ -216,10 +278,39 @@ class ToolsPanel(QWidget):
             # Sync feather slider value to the tool
             tool.feather = self._wand_feather_slider.value()
 
+    def set_liquify_tool_ref(self, tool):
+        """Set liquify tool reference for panel interaction and sync panel values."""
+        self._liquify_tool = tool
+        enabled = tool is not None and getattr(tool, "is_active", False)
+        self._liquify_mode_combo.setEnabled(enabled)
+        self._liquify_radius_slider.setEnabled(enabled)
+        self._liquify_strength_slider.setEnabled(enabled)
+        self._liquify_apply_btn.setEnabled(enabled)
+        self._liquify_cancel_btn.setEnabled(enabled)
+        if not enabled:
+            return
+
+        self._liquify_mode_combo.blockSignals(True)
+        self._liquify_radius_slider.blockSignals(True)
+        self._liquify_strength_slider.blockSignals(True)
+        try:
+            self._liquify_mode_combo.setCurrentIndex(int(getattr(tool, "mode", 0)))
+            radius_val = int(round(float(getattr(tool, "radius", 50.0))))
+            strength_val = int(round(float(getattr(tool, "strength", 0.5)) * 100))
+            self._liquify_radius_slider.setValue(max(5, min(300, radius_val)))
+            self._liquify_strength_slider.setValue(max(1, min(100, strength_val)))
+            self._liquify_radius_label.setText(str(self._liquify_radius_slider.value()))
+            self._liquify_strength_label.setText(f"{self._liquify_strength_slider.value()}%")
+        finally:
+            self._liquify_mode_combo.blockSignals(False)
+            self._liquify_radius_slider.blockSignals(False)
+            self._liquify_strength_slider.blockSignals(False)
+
     def _on_tool_btn_clicked(self, name):
         self._active_tool_name = name
         self._set_active_button(name)
         self.wand_panel.setVisible(name == "Magic Wand")
+        self.liquify_panel.setVisible(name == "Liquify")
         # Notify sibling brush panel to clear its selection
         if hasattr(self, '_on_tool_activated_cb') and self._on_tool_activated_cb:
             self._on_tool_activated_cb()
@@ -235,6 +326,8 @@ class ToolsPanel(QWidget):
         self._active_tool_name = None
         for btn in self._tool_buttons.values():
             btn.setChecked(False)
+        self.wand_panel.setVisible(False)
+        self.liquify_panel.setVisible(False)
 
     def _on_wand_mode_changed(self, id, checked):
         if checked and self._magic_wand_tool:
@@ -275,6 +368,42 @@ class ToolsPanel(QWidget):
         self._wand_status_label.setText(msg)
         self._wand_status_label.setVisible(bool(msg))
         self._refresh_wand_info()
+
+    def _on_liquify_mode_changed(self, index):
+        if self._liquify_tool and hasattr(self._liquify_tool, "set_mode"):
+            self._liquify_tool.set_mode(index)
+
+    def _on_liquify_radius_changed(self, value):
+        self._liquify_radius_label.setText(str(value))
+        if self._liquify_tool and hasattr(self._liquify_tool, "set_radius"):
+            self._liquify_tool.set_radius(value)
+
+    def _on_liquify_strength_changed(self, value):
+        self._liquify_strength_label.setText(f"{value}%")
+        if self._liquify_tool and hasattr(self._liquify_tool, "set_strength"):
+            self._liquify_tool.set_strength(value / 100.0)
+
+    def _finish_liquify_session(self, apply):
+        tool = self._liquify_tool
+        if tool is None:
+            return
+
+        if apply and hasattr(tool, "apply_and_finish"):
+            tool.apply_and_finish()
+        elif hasattr(tool, "cancel_and_finish"):
+            tool.cancel_and_finish()
+
+        canvas = getattr(tool, "canvas", None)
+        if canvas is not None and hasattr(canvas, "set_tool"):
+            canvas.set_tool("Rect Select")
+            if hasattr(canvas, "_tool_switched_callback") and canvas._tool_switched_callback:
+                canvas._tool_switched_callback("Rect Select")
+
+    def _on_liquify_apply(self):
+        self._finish_liquify_session(apply=True)
+
+    def _on_liquify_cancel(self):
+        self._finish_liquify_session(apply=False)
 
 class AIPanel(QWidget):
     def __init__(self):
@@ -366,21 +495,30 @@ class LeftSidebar(QWidget):
     def _on_tool_selected_wrapper(self, tool_name):
         """Intercept tool selection to wire up the magic wand tool reference."""
         self._original_tool_cb(tool_name)
-        
-        # Connect magic wand tool reference
-        if tool_name == "Magic Wand" and self._canvas:
-            gl = self._canvas.gl_canvas if hasattr(self._canvas, 'gl_canvas') else self._canvas
-            if gl.active_tool and hasattr(gl.active_tool, 'set_point_mode'):
-                self.tools_panel.set_magic_wand_tool_ref(gl.active_tool)
-            # Register auto-switch callback so panel updates when tool changes itself
-            gl._tool_switched_callback = self._on_tool_auto_switched
+
+        if not self._canvas:
+            self.tools_panel.set_magic_wand_tool_ref(None)
+            self.tools_panel.set_liquify_tool_ref(None)
+            return
+
+        gl = self._canvas.gl_canvas if hasattr(self._canvas, 'gl_canvas') else self._canvas
+        gl._tool_switched_callback = self._on_tool_auto_switched
+
+        if tool_name == "Magic Wand" and gl.active_tool and hasattr(gl.active_tool, 'set_point_mode'):
+            self.tools_panel.set_magic_wand_tool_ref(gl.active_tool)
         else:
             self.tools_panel.set_magic_wand_tool_ref(None)
+
+        if tool_name == "Liquify" and gl.active_tool and hasattr(gl.active_tool, 'apply_and_finish'):
+            self.tools_panel.set_liquify_tool_ref(gl.active_tool)
+        else:
+            self.tools_panel.set_liquify_tool_ref(None)
 
     def _on_brush_activated(self):
         """Called when a brush is clicked 鈥?clear tool pressed state."""
         self.tools_panel.clear_active_button()
         self.tools_panel.wand_panel.setVisible(False)
+        self.tools_panel.liquify_panel.setVisible(False)
 
     def _on_tool_activated(self):
         """Called when a tool is clicked 鈥?clear brush tree selection."""
@@ -391,7 +529,9 @@ class LeftSidebar(QWidget):
         self.tools_panel._active_tool_name = tool_name
         self.tools_panel._set_active_button(tool_name)
         self.tools_panel.wand_panel.setVisible(tool_name == "Magic Wand")
+        self.tools_panel.liquify_panel.setVisible(tool_name == "Liquify")
         self.tools_panel.set_magic_wand_tool_ref(None)
+        self.tools_panel.set_liquify_tool_ref(None)
 
     def _add_divider(self, layout):
         line = QFrame()
@@ -553,7 +693,9 @@ class LayerPanel(QWidget):
 
         node.visible = bool(data.get("visible", True))
         node.opacity = float(data.get("opacity", 1.0))
-        node.uuid = data.get("uuid")
+        restored_uuid = data.get("uuid")
+        if restored_uuid:
+            node.uuid = restored_uuid
         img = data.get("image")
         if img is not None:
             node.load_from_image(img.copy())
@@ -1064,6 +1206,8 @@ class PropertyPanel(QWidget):
         l_brush.addLayout(mk_sl("Size", 1, 300, 10, lambda v: setattr(self.canvas.current_brush, 'size', v) if self.canvas.current_brush else None))
         l_brush.addLayout(mk_sl("Opacity", 0, 100, 100, lambda v: setattr(self.canvas.current_brush, 'opacity', v/100) if self.canvas.current_brush else None))
         l_brush.addLayout(mk_sl("Flow", 0, 100, 100, lambda v: setattr(self.canvas.current_brush, 'flow', v/100) if self.canvas.current_brush else None))
+        smoothing_init = int(getattr(getattr(self.canvas, "stabilizer", None), "smoothing_factor", 0.0) * 100)
+        l_brush.addLayout(mk_sl("Stabilize", 0, 95, smoothing_init, self._on_smoothing_change))
 
         self.btn_pressure_size = QPushButton("Pressure Size Curve")
         self.btn_pressure_size.clicked.connect(lambda: self._toggle_pressure_curve('size'))
@@ -1125,4 +1269,11 @@ class PropertyPanel(QWidget):
             self.canvas.current_brush.pressure_size_curve = self.pressure_size_editor.get_curve_points()
         else:
             self.canvas.current_brush.pressure_opacity_curve = self.pressure_opacity_editor.get_curve_points()
+
+    def _on_smoothing_change(self, value):
+        try:
+            if hasattr(self.canvas, "stabilizer") and self.canvas.stabilizer:
+                self.canvas.stabilizer.smoothing_factor = max(0.0, min(0.98, value / 100.0))
+        except Exception:
+            pass
 

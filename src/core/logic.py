@@ -53,7 +53,7 @@ class PaintLayer(Node):
         self.height = height
         self.texture = None
         self.fbo = None
-        self.uuid = None
+        self.uuid = str(uuid.uuid4())
         self.setup()
 
     def setup(self):
@@ -175,21 +175,58 @@ class TextLayer(PaintLayer):
 
 # ... (Rest of logic.py remains unchanged) ...
 class PaintCommand:
-    def __init__(self, layer, old_img, new_img):
+    def __init__(self, layer, old_img, new_img, canvas=None):
         self.layer = layer
-        self.old_img = old_img
-        self.new_img = new_img
+        self.canvas = canvas
+        self.old_img = old_img.copy() if hasattr(old_img, "copy") else old_img
+        self.new_img = new_img.copy() if hasattr(new_img, "copy") else new_img
+        self.layer_uuid = None
+
+        if self.layer is not None:
+            try:
+                if not getattr(self.layer, "uuid", None):
+                    self.layer.uuid = str(uuid.uuid4())
+                self.layer_uuid = self.layer.uuid
+            except Exception:
+                self.layer_uuid = None
+
+    def bind_canvas(self, canvas):
+        if self.canvas is None:
+            self.canvas = canvas
+
+    def _resolve_layer(self):
+        if self.canvas is not None and self.layer_uuid and hasattr(self.canvas, "find_layer_by_uuid"):
+            resolved = self.canvas.find_layer_by_uuid(self.layer_uuid)
+            if resolved is not None:
+                self.layer = resolved
+                return resolved
+        return self.layer
+
     def undo(self):
-        if self.layer: self.layer.load_from_image(self.old_img)
+        layer = self._resolve_layer()
+        if layer:
+            img = self.old_img.copy() if hasattr(self.old_img, "copy") else self.old_img
+            layer.load_from_image(img)
+
     def redo(self):
-        if self.layer: self.layer.load_from_image(self.new_img)
+        layer = self._resolve_layer()
+        if layer:
+            img = self.new_img.copy() if hasattr(self.new_img, "copy") else self.new_img
+            layer.load_from_image(img)
 
 class UndoStack:
-    def __init__(self, limit=30):
+    def __init__(self, limit=30, owner_canvas=None):
         self.undo_list = []
         self.redo_list = []
         self.limit = limit
+        self.owner_canvas = owner_canvas
+
+    def bind_owner(self, canvas):
+        self.owner_canvas = canvas
+
     def push(self, cmd):
+        if hasattr(cmd, "bind_canvas"):
+            cmd.bind_canvas(self.owner_canvas)
         self.undo_list.append(cmd); self.redo_list.clear()
         if len(self.undo_list) > self.limit: self.undo_list.pop(0)
     def undo(self):
@@ -237,7 +274,7 @@ class ProjectLogic:
                     if node_data["type"] == "TextLayer":
                         l = TextLayer(width, height, text=node_data.get("text_content", "Text"), font_size=node_data.get("font_size", 50), color=node_data.get("text_color", (0,0,0,255)), x=node_data.get("pos_x", 0), y=node_data.get("pos_y", 0), name=node_data["name"])
                     else: l = PaintLayer(width, height, node_data["name"])
-                    l.visible = node_data["visible"]; l.opacity = node_data["opacity"]; l.uuid = node_data.get("uuid")
+                    l.visible = node_data["visible"]; l.opacity = node_data["opacity"]; l.uuid = node_data.get("uuid") or str(uuid.uuid4())
                     img_path = os.path.join(temp_dir, f"{l.uuid}.png")
                     if os.path.exists(img_path): pil_img = Image.open(img_path); l.load_from_image(pil_img)
                     parent.add_child(l)

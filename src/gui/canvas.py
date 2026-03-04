@@ -12,6 +12,7 @@ from src.core.logic import Node, GroupLayer, PaintLayer, PaintCommand, UndoStack
 from src.core.history import CanvasStateCommand
 from src.core.psd_utils import collect_paint_layers_for_export, write_psd
 from src.core.tools import RectSelectTool, LassoTool, BucketTool, PickerTool, SmudgeTool, TextTool, ClipboardUtils, MagicWandTool, LiquifyTool
+from src.core.brush_functions import StrokeStabilizer
 from src.core.processor import ImageProcessor
 from src.gui.dialogs import GradientMapDialog, AdjustmentDialog
 from src.agent.agent_manager import AIAgentManager
@@ -54,11 +55,12 @@ class GLCanvas(QOpenGLWidget):
         self._brush_color = [0,0,0]
         self.brush_texture_id = None
         self.last_pos = None
+        self.stabilizer = StrokeStabilizer(smoothing_factor=0.0)
 
         self.is_panning = False
         self.last_pan_pos = QPointF(0, 0)
 
-        self.undo_stack = UndoStack()
+        self.undo_stack = UndoStack(owner_canvas=self)
         self._stroke_start_image = None
         self._history_restoring = False
         self.active_tool_name = None
@@ -161,6 +163,22 @@ class GLCanvas(QOpenGLWidget):
             for child in node.children:
                 yield from self._iter_paint_layers(child)
 
+    def find_layer_by_uuid(self, layer_uuid):
+        if not layer_uuid:
+            return None
+
+        def walk(node):
+            if isinstance(node, PaintLayer) and getattr(node, "uuid", None) == layer_uuid:
+                return node
+            if hasattr(node, "children"):
+                for child in node.children:
+                    res = walk(child)
+                    if res is not None:
+                        return res
+            return None
+
+        return walk(self.root)
+
     def _cleanup_node_resources(self, node):
         if isinstance(node, PaintLayer):
             try:
@@ -201,6 +219,8 @@ class GLCanvas(QOpenGLWidget):
 
     def _snapshot_layer_data(self, layer):
         img = self._read_layer_rgba(layer).copy()
+        if not getattr(layer, "uuid", None):
+            layer.uuid = str(uuid.uuid4())
         data = {
             "type": "TextLayer" if isinstance(layer, TextLayer) else "PaintLayer",
             "name": layer.name,
@@ -264,7 +284,7 @@ class GLCanvas(QOpenGLWidget):
 
         layer.visible = bool(data.get("visible", True))
         layer.opacity = float(data.get("opacity", 1.0))
-        layer.uuid = data.get("uuid")
+        layer.uuid = data.get("uuid") or str(uuid.uuid4())
         img = data.get("image")
         if img is not None:
             layer.load_from_image(img)
@@ -587,9 +607,12 @@ class GLCanvas(QOpenGLWidget):
                 if self.active_layer and isinstance(self.active_layer, PaintLayer) and self.active_layer.visible and self.current_brush:
                     self.makeCurrent()
                     self._stroke_start_image = self.active_layer.get_image()
+                    if self.stabilizer.smoothing_factor > 0:
+                        self.stabilizer.reset()
+                        self.last_pos = self.stabilizer.update(pos)
                     # Ensure texture is loaded
                     self._update_brush_texture()
-                    self._paint_stroke(pos, pressure=1.0)
+                    self._paint_stroke(self.last_pos, pressure=1.0)
 
     def mouseMoveEvent(self, event):
         if self.is_panning:
@@ -605,6 +628,8 @@ class GLCanvas(QOpenGLWidget):
         if self.active_tool:
             self.active_tool.mouse_move(event, event.position(), pos)
         elif self.last_pos:
+            if self.stabilizer.smoothing_factor > 0:
+                pos = self.stabilizer.update(pos)
             self._paint_stroke(pos, pressure=1.0)
             self.last_pos = pos
 
@@ -647,10 +672,15 @@ class GLCanvas(QOpenGLWidget):
             if self.active_layer and isinstance(self.active_layer, PaintLayer) and self.active_layer.visible and self.current_brush:
                 self.makeCurrent()
                 self._stroke_start_image = self.active_layer.get_image()
+                if self.stabilizer.smoothing_factor > 0:
+                    self.stabilizer.reset()
+                    self.last_pos = self.stabilizer.update(pos)
                 self._update_brush_texture()
-                self._paint_stroke(pos, pressure=pressure)
+                self._paint_stroke(self.last_pos, pressure=pressure)
         elif event.type() == QEvent.Type.TabletMove:
             if self.last_pos:
+                if self.stabilizer.smoothing_factor > 0:
+                    pos = self.stabilizer.update(pos)
                 self._paint_stroke(pos, pressure=pressure)
                 self.last_pos = pos
         elif event.type() == QEvent.Type.TabletRelease:
@@ -723,6 +753,13 @@ class GLCanvas(QOpenGLWidget):
 
         # Escape
         if event.key() == Qt.Key.Key_Escape:
+            if self.active_tool and isinstance(self.active_tool, LiquifyTool):
+                self.active_tool.cancel_and_finish()
+                self.set_tool("Rect Select")
+                if self._tool_switched_callback:
+                    self._tool_switched_callback("Rect Select")
+                self.update()
+                return
             if self.active_tool and hasattr(self.active_tool, 'deactivate'):
                 self.active_tool.deactivate()
             if not self.active_tool:
@@ -1413,7 +1450,7 @@ class GLCanvas(QOpenGLWidget):
             self.makeCurrent()
             width, height, root = ProjectLogic.load_project(path)
             self.doc_width = width; self.doc_height = height; self.root = root
-            self.undo_stack = UndoStack()
+            self.undo_stack = UndoStack(owner_canvas=self)
             self.active_layer = None
             def find_first(node):
                 if isinstance(node, PaintLayer): return node
@@ -1507,6 +1544,48 @@ class GLCanvas(QOpenGLWidget):
         data = glReadPixels(0, 0, self.doc_width, self.doc_height, GL_RGBA, GL_UNSIGNED_BYTE)
         Image.frombytes("RGBA", (self.doc_width, self.doc_height), data).transpose(Image.FLIP_TOP_BOTTOM).save(path)
         glDeleteFramebuffers(1, [fbo]); glDeleteTextures([tex]); glBindFramebuffer(GL_FRAMEBUFFER, 0)
+
+    def capture_visible_image(self):
+        """Render currently visible layers to a PIL RGBA image."""
+        try:
+            self.makeCurrent()
+            fbo = glGenFramebuffers(1)
+            tex = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_2D, tex)
+            glTexImage2D(
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA,
+                self.doc_width,
+                self.doc_height,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                None,
+            )
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo)
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0)
+            glViewport(0, 0, self.doc_width, self.doc_height)
+            glClearColor(0, 0, 0, 0)
+            glClear(GL_COLOR_BUFFER_BIT)
+            glMatrixMode(GL_PROJECTION)
+            glLoadIdentity()
+            glOrtho(0, self.doc_width, self.doc_height, 0, -1, 1)
+            glMatrixMode(GL_MODELVIEW)
+            glLoadIdentity()
+            glEnable(GL_BLEND)
+            glEnable(GL_TEXTURE_2D)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            self._render_node(self.root)
+            data = glReadPixels(0, 0, self.doc_width, self.doc_height, GL_RGBA, GL_UNSIGNED_BYTE)
+            img = Image.frombytes("RGBA", (self.doc_width, self.doc_height), data).transpose(Image.FLIP_TOP_BOTTOM)
+            glDeleteFramebuffers(1, [fbo])
+            glDeleteTextures([tex])
+            glBindFramebuffer(GL_FRAMEBUFFER, 0)
+            return img
+        except Exception as e:
+            print(f"Capture visible image failed: {e}")
+            return None
 
     def _read_layer_rgba(self, node):
         """
@@ -1762,6 +1841,8 @@ class CanvasWidget(QWidget):
     def brush_color(self): return self.gl_canvas.brush_color
     @brush_color.setter
     def brush_color(self, v): self.gl_canvas.brush_color = v
+    @property
+    def stabilizer(self): return self.gl_canvas.stabilizer
     def initializeGL(self): self.gl_canvas.initializeGL()
     def update(self): super().update(); self.gl_canvas.update()
     def import_psd(self, path): self.gl_canvas.import_psd(path)
@@ -1769,6 +1850,7 @@ class CanvasWidget(QWidget):
     def save_project(self, path): self.gl_canvas.save_project(path)
     def export_image(self, path): self.gl_canvas.export_image(path)
     def export_psd(self, path): self.gl_canvas.export_to_psd(path)
+    def capture_visible_image(self): return self.gl_canvas.capture_visible_image()
     def set_brush(self, config): self.gl_canvas.set_brush(config)
     def resize_canvas_smart(self, w, h, anchor): self.gl_canvas.resize_canvas_smart(w, h, anchor)
     def load_project(self, path): self.gl_canvas.load_project(path)

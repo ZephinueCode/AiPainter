@@ -14,6 +14,8 @@ from PyQt6.QtWidgets import (
     QGraphicsPathItem,
     QGraphicsScene,
     QGraphicsView,
+    QTextEdit,
+    QPlainTextEdit,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QPointF, QRectF
 from PyQt6.QtGui import (QPainter, QColor, QConicalGradient, QBrush, QPainterPath, QLinearGradient, QPen, QPixmap, QImage, QMouseEvent)
@@ -706,3 +708,89 @@ class GeneratorStatusWidget(QFrame):
         if self.current_image:
             self.addLayerRequested.emit(self.current_image)
             self.hide()
+
+
+class ChatPanelWidget(QFrame):
+    sendRequested = pyqtSignal(str, bool)  # (message, include_visible_image)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(
+            "QFrame { background: #ffffff; border: 1px solid #c8c8c8; border-radius: 6px; }"
+            "QLabel { color: #333; }"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        self._title = QLabel("AiPainter Chat")
+        self._title.setStyleSheet("font-weight: bold;")
+        layout.addWidget(self._title)
+
+        self.history = QTextEdit()
+        self.history.setReadOnly(True)
+        self.history.setPlaceholderText("Chat history will appear here.")
+        self.history.setMinimumHeight(240)
+        layout.addWidget(self.history, 1)
+
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #777; font-size: 11px;")
+        layout.addWidget(self.status_label)
+
+        self.input = QPlainTextEdit()
+        self.input.setPlaceholderText("Type your question or request...")
+        self.input.setMaximumHeight(100)
+        layout.addWidget(self.input)
+
+        row = QHBoxLayout()
+        self.btn_send = QPushButton("Send")
+        self.btn_send.clicked.connect(self._on_send_clicked)
+        row.addWidget(self.btn_send)
+
+        self.btn_send_with_view = QPushButton("Ask About Visible Image")
+        self.btn_send_with_view.clicked.connect(self._on_send_with_view_clicked)
+        row.addWidget(self.btn_send_with_view)
+
+        self.btn_clear = QPushButton("Clear")
+        self.btn_clear.clicked.connect(self.clear_chat)
+        row.addWidget(self.btn_clear)
+        layout.addLayout(row)
+
+    def _normalized_input(self):
+        return self.input.toPlainText().strip()
+
+    def _on_send_clicked(self):
+        text = self._normalized_input()
+        if not text:
+            return
+        self.sendRequested.emit(text, False)
+
+    def _on_send_with_view_clicked(self):
+        text = self._normalized_input()
+        if not text:
+            text = "Please review the current visible drawing and give specific improvement suggestions."
+        self.sendRequested.emit(text, True)
+
+    def set_busy(self, busy: bool, status: str = ""):
+        self.btn_send.setEnabled(not busy)
+        self.btn_send_with_view.setEnabled(not busy)
+        self.input.setEnabled(not busy)
+        self.status_label.setText(status if status else ("Waiting for response..." if busy else ""))
+
+    def append_user(self, text: str, with_image: bool = False):
+        marker = " [Visible Image]" if with_image else ""
+        self.history.append(f"User{marker}: {text}")
+        self.history.verticalScrollBar().setValue(self.history.verticalScrollBar().maximum())
+
+    def append_assistant(self, text: str):
+        self.history.append(f"Assistant: {text}")
+        self.history.verticalScrollBar().setValue(self.history.verticalScrollBar().maximum())
+
+    def clear_input(self):
+        self.input.clear()
+
+    def clear_chat(self):
+        self.history.clear()
+        self.status_label.setText("")

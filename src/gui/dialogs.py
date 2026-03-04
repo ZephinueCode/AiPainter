@@ -216,6 +216,7 @@ class SettingsDialog(QDialog):
         
         form_conn = QFormLayout()
         self.txt_base_url = QLineEdit(self.agent_manager.base_url)
+        self.txt_base_url.setPlaceholderText("https://dashscope.aliyuncs.com/api/v1")
         self.txt_api_key = QLineEdit(self.agent_manager.api_key)
         self.txt_api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.txt_proxy = QLineEdit(self.agent_manager.proxy)
@@ -243,7 +244,7 @@ class SettingsDialog(QDialog):
         form_models = QFormLayout()
 
         self.txt_generate_model = QLineEdit(self.agent_manager.generate_model)
-        self.txt_generate_model.setPlaceholderText("e.g. qwen-vl-max, wanx-v1")
+        self.txt_generate_model.setPlaceholderText("e.g. qwen-image-2.0, wanx2.1-t2i-plus")
         form_models.addRow("Generate (Text→Image):", self.txt_generate_model)
 
         self.txt_edit_model = QLineEdit(self.agent_manager.edit_model)
@@ -258,12 +259,26 @@ class SettingsDialog(QDialog):
         self.txt_layered_model.setPlaceholderText("e.g. qwen/qwen-image-layered")
         form_models.addRow("Layered (Replicate):", self.txt_layered_model)
 
+        self.txt_chat_model = QLineEdit(self.agent_manager.chat_model)
+        self.txt_chat_model.setPlaceholderText("e.g. qwen3.5-plus")
+        form_models.addRow("Chat (Assistant):", self.txt_chat_model)
+
         self.txt_replicate_key = QLineEdit(self.agent_manager.replicate_api_key)
         self.txt_replicate_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.txt_replicate_key.setPlaceholderText("Replicate API Token (r8_...)")
         form_models.addRow("Replicate API Key:", self.txt_replicate_key)
 
         layout_ai.addLayout(form_models)
+
+        chat_prompt_label = QLabel("Chat System Prompt")
+        chat_prompt_label.setStyleSheet("font-weight: bold; margin-top: 8px;")
+        layout_ai.addWidget(chat_prompt_label)
+
+        self.txt_chat_system_prompt = QTextEdit()
+        self.txt_chat_system_prompt.setPlaceholderText("Default behavior prompt for the chat assistant.")
+        self.txt_chat_system_prompt.setMaximumHeight(120)
+        self.txt_chat_system_prompt.setPlainText(self.agent_manager.chat_system_prompt)
+        layout_ai.addWidget(self.txt_chat_system_prompt)
 
         btn_reset_models = QPushButton("Reset to Defaults")
         btn_reset_models.setStyleSheet("color: #888;")
@@ -365,6 +380,8 @@ class SettingsDialog(QDialog):
             edit_model=self.txt_edit_model.text(),
             inpaint_model=self.txt_inpaint_model.text(),
             layered_model=self.txt_layered_model.text(),
+            chat_model=self.txt_chat_model.text(),
+            chat_system_prompt=self.txt_chat_system_prompt.toPlainText(),
             replicate_api_key=self.txt_replicate_key.text(),
             superres_general_model_path=self.txt_sr_general_model_path.text(),
             superres_illustration_model_path=self.txt_sr_illustration_model_path.text(),
@@ -457,6 +474,8 @@ class SettingsDialog(QDialog):
         self.txt_edit_model.setText(_DEFAULT_MODELS["edit_model"])
         self.txt_inpaint_model.setText(_DEFAULT_MODELS["inpaint_model"])
         self.txt_layered_model.setText(_DEFAULT_MODELS["layered_model"])
+        self.txt_chat_model.setText(_DEFAULT_MODELS["chat_model"])
+        self.txt_chat_system_prompt.setPlainText(_DEFAULT_MODELS["chat_system_prompt"])
         self.txt_sr_general_model_path.setText(_DEFAULT_MODELS["superres_general_model_path"])
         self.txt_sr_illustration_model_path.setText(_DEFAULT_MODELS["superres_illustration_model_path"])
 

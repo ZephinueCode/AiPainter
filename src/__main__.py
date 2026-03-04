@@ -20,9 +20,10 @@ from src.core.brush_manager import BrushManager
 from src.gui.canvas import CanvasWidget
 from src.gui.panels import LeftSidebar, LayerPanel, PropertyPanel
 from src.gui.dialogs import SettingsDialog, CanvasSizeDialog, AIGenerateDialog
-from src.gui.widgets import GeneratorStatusWidget
+from src.gui.widgets import GeneratorStatusWidget, ChatPanelWidget
 from src.agent.agent_manager import AIAgentManager 
 from src.agent.generate import ImageGenerator
+from src.agent.chat_service import ChatRequestThread
 from src.core.logic import PaintLayer # For adding new layer
 from src.core.tools import ClipboardUtils
 from PIL import Image
@@ -42,6 +43,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("AiPainter V0.1")
         self.resize(1600, 900)
+        self.gen_status = None
         
         self.agent_manager = AIAgentManager()
         self.ui_scale = 1.0
@@ -67,11 +69,16 @@ class MainWindow(QMainWindow):
         self.gen_status.copyRequested.connect(self.copy_generated_image)
         self.gen_status.addLayerRequested.connect(self.add_generated_layer)
         self.gen_status.hide()
+        self._chat_thread = None
+        self._chat_history = []
         
         self.statusBar().showMessage("Ready")
 
     def resizeEvent(self, event):
-        super().resizeEvent(event)
+        if event is not None:
+            super().resizeEvent(event)
+        if self.gen_status is None or not hasattr(self, "dock_left"):
+            return
         # Position status widget at bottom left, above status bar
         # Adjust as needed based on layout
         margin = 20
@@ -157,6 +164,61 @@ class MainWindow(QMainWindow):
         if self._forward_text_shortcut("redo"):
             return
         self.canvas.gl_canvas.perform_redo()
+
+    def _clear_chat_history(self):
+        self._chat_history = []
+
+    def _on_chat_progress(self, msg):
+        if hasattr(self, "chat_panel") and self.chat_panel:
+            self.chat_panel.set_busy(True, msg)
+
+    def _on_chat_finished(self, assistant_text, error):
+        if hasattr(self, "chat_panel") and self.chat_panel:
+            self.chat_panel.set_busy(False, "")
+
+        if error:
+            QMessageBox.warning(self, "Chat Error", error)
+            return
+
+        if assistant_text:
+            self._chat_history.append({"role": "assistant", "text": assistant_text})
+            self.chat_panel.append_assistant(assistant_text)
+            self.statusBar().showMessage("Chat response received.", 3000)
+            if len(self._chat_history) > 40:
+                self._chat_history = self._chat_history[-40:]
+
+    def on_chat_send(self, text, include_visible_image):
+        text = (text or "").strip()
+        if not text:
+            return
+        if self._chat_thread and self._chat_thread.isRunning():
+            self.statusBar().showMessage("Chat request is still running...", 3000)
+            return
+
+        visible_img = None
+        if include_visible_image:
+            visible_img = self.canvas.capture_visible_image()
+            if visible_img is None:
+                QMessageBox.warning(self, "Chat", "Failed to capture visible image.")
+                return
+
+        self.chat_panel.append_user(text, with_image=include_visible_image)
+        self.chat_panel.clear_input()
+        self.chat_panel.set_busy(True, "Preparing chat request...")
+        self._chat_history.append({"role": "user", "text": text})
+        if len(self._chat_history) > 40:
+            self._chat_history = self._chat_history[-40:]
+
+        self._chat_thread = ChatRequestThread(
+            user_text=text,
+            history=self._chat_history,
+            include_image=include_visible_image,
+            visible_image=visible_img,
+            parent=self,
+        )
+        self._chat_thread.progress.connect(self._on_chat_progress)
+        self._chat_thread.finished.connect(self._on_chat_finished)
+        self._chat_thread.start()
         
     def start_generation(self, prompt, neg, size):
         self.gen_status.start_loading()
@@ -345,10 +407,26 @@ class MainWindow(QMainWindow):
         self.dock_prop.setWidget(self.prop_panel)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_prop)
 
+        self.dock_chat = QDockWidget("Chat", self)
+        self.dock_chat.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea
+            | Qt.DockWidgetArea.RightDockWidgetArea
+            | Qt.DockWidgetArea.BottomDockWidgetArea
+        )
+        self.chat_panel = ChatPanelWidget(self)
+        self.chat_panel.sendRequested.connect(self.on_chat_send)
+        self.chat_panel.btn_clear.clicked.connect(self._clear_chat_history)
+        self.dock_chat.setWidget(self.chat_panel)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_chat)
+        self.dock_chat.setFloating(True)
+        self.dock_chat.hide()
+        self.dock_chat.toggleViewAction().setText("Chat Page")
+
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.dock_left.toggleViewAction())
         view_menu.addAction(self.dock_layer.toggleViewAction())
         view_menu.addAction(self.dock_prop.toggleViewAction())
+        view_menu.addAction(self.dock_chat.toggleViewAction())
 
     def on_new_project(self):
         dlg = CanvasSizeDialog(self)

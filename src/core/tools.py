@@ -957,6 +957,8 @@ class LiquifyTool(Tool):
         self.texture_id = None
         self.preview_img = None
         self._target_layer = None
+        self._has_changes = False
+        self._applied = False
         self.last_mouse_pos = None
         self.hover_pos = None
 
@@ -967,6 +969,8 @@ class LiquifyTool(Tool):
             return
         self.is_active = True
         self._target_layer = layer
+        self._has_changes = False
+        self._applied = False
         self._init_grid()
         layer.visible = False
         self.canvas.update()
@@ -975,19 +979,57 @@ class LiquifyTool(Tool):
         if self.is_active:
             if self._target_layer:
                 self._target_layer.visible = True
-            self.commit()
+            # Explicit Apply/Cancel UX: deactivate does not auto-commit.
+            # If user did not apply, preview is discarded.
+        self._cleanup()
+        self.canvas.update()
+
+    def set_mode(self, mode):
+        try:
+            mode = int(mode)
+        except Exception:
+            return
+        if mode in (self.MODE_PUSH, self.MODE_BLOAT, self.MODE_PUCKER, self.MODE_RESTORE):
+            self.mode = mode
+
+    def set_radius(self, radius):
+        try:
+            self.radius = max(1.0, float(radius))
+        except Exception:
+            pass
+
+    def set_strength(self, strength):
+        try:
+            self.strength = max(0.01, min(1.0, float(strength)))
+        except Exception:
+            pass
+
+    def _cleanup(self):
+        if self.texture_id:
+            try:
+                self.canvas.makeCurrent()
+                glDeleteTextures([self.texture_id])
+            except Exception:
+                pass
+            self.texture_id = None
         self.is_active = False
         self.grid_points = None
-        self.canvas.update()
+        self.orig_grid_points = None
+        self.uv_coords = None
+        self.grid_rows = 0
+        self.grid_cols = 0
+        self.last_mouse_pos = None
+        self.hover_pos = None
+        self.preview_img = None
+        self._target_layer = None
+        self._has_changes = False
+        self._applied = False
 
     def commit(self):
         if not self.is_active or self.grid_points is None or self._target_layer is None:
-            return
-
-        before_state = None
-        use_global_history = hasattr(self.canvas, "begin_history_action") and hasattr(self.canvas, "end_history_action")
-        if use_global_history:
-            before_state = self.canvas.begin_history_action()
+            return False
+        if not self._has_changes:
+            return False
 
         try:
             self.canvas.makeCurrent()
@@ -1015,15 +1057,33 @@ class LiquifyTool(Tool):
             glDeleteTextures([tex])
             glBindFramebuffer(GL_FRAMEBUFFER, 0)
 
-            if use_global_history:
-                self._target_layer.load_from_image(res_img)
-                self.canvas.end_history_action(before_state, "Liquify")
-            else:
-                cmd = PaintCommand(self._target_layer, self.preview_img, res_img)
-                self.canvas.undo_stack.push(cmd)
-                self._target_layer.load_from_image(res_img)
+            old_img = self.preview_img.copy() if self.preview_img is not None else self._target_layer.get_image()
+            if old_img.tobytes() == res_img.tobytes():
+                return False
+            cmd = PaintCommand(self._target_layer, old_img, res_img.copy())
+            self.canvas.undo_stack.push(cmd)
+            self._target_layer.load_from_image(res_img)
+            self._applied = True
+            return True
         except Exception as e:
             print(f"Liquify Commit Error: {e}")
+            return False
+
+    def apply_and_finish(self):
+        """Commit liquify changes and close the tool session."""
+        ok = self.commit()
+        if self._target_layer:
+            self._target_layer.visible = True
+        self._cleanup()
+        self.canvas.update()
+        return ok
+
+    def cancel_and_finish(self):
+        """Discard liquify preview and close the tool session."""
+        if self._target_layer:
+            self._target_layer.visible = True
+        self._cleanup()
+        self.canvas.update()
 
     def _init_grid(self):
         img = self._target_layer.get_image()
@@ -1096,14 +1156,20 @@ class LiquifyTool(Tool):
             if np.linalg.norm(move_vec) < 0.1:
                 return
             self.grid_points[mask] += move_vec[np.newaxis, :] * factor[:, np.newaxis]
+            self._has_changes = True
         elif self.mode == self.MODE_BLOAT:
             self.grid_points[mask] += diff[mask] * (factor[:, np.newaxis] * 0.1)
+            self._has_changes = True
         elif self.mode == self.MODE_PUCKER:
             self.grid_points[mask] -= diff[mask] * (factor[:, np.newaxis] * 0.1)
+            self._has_changes = True
         elif self.mode == self.MODE_RESTORE:
             current = self.grid_points[mask]
             target = self.orig_grid_points[mask]
-            self.grid_points[mask] += (target - current) * (factor[:, np.newaxis] * 0.5)
+            delta = (target - current) * (factor[:, np.newaxis] * 0.5)
+            if np.any(np.abs(delta) > 1e-3):
+                self.grid_points[mask] += delta
+                self._has_changes = True
 
     def draw_overlay(self, painter):
         if not self.is_active or not self.hover_pos:
