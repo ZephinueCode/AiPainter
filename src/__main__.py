@@ -14,7 +14,7 @@ except ImportError:
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QDockWidget, QFileDialog, QMessageBox)
 from PyQt6.QtCore import Qt, QPoint
-from PyQt6.QtGui import QAction, QPalette, QColor, QFont, QImage
+from PyQt6.QtGui import QAction, QPalette, QColor, QFont, QImage, QKeySequence
 
 from src.core.brush_manager import BrushManager
 from src.gui.canvas import CanvasWidget
@@ -24,6 +24,7 @@ from src.gui.widgets import GeneratorStatusWidget
 from src.agent.agent_manager import AIAgentManager 
 from src.agent.generate import ImageGenerator
 from src.core.logic import PaintLayer # For adding new layer
+from src.core.tools import ClipboardUtils
 from PIL import Image
 import io
 
@@ -87,6 +88,75 @@ class MainWindow(QMainWindow):
         # Connect generation request
         dlg.generationRequested.connect(self.start_generation)
         dlg.exec()
+
+    def on_auto_sketch(self):
+        self.canvas.gl_canvas.start_auto_sketch()
+
+    def on_auto_color(self):
+        self.canvas.gl_canvas.start_auto_color()
+
+    def on_auto_optimize(self):
+        self.canvas.gl_canvas.start_auto_optimize()
+
+    def on_auto_resolution(self):
+        self.canvas.gl_canvas.start_auto_resolution()
+
+    def _layer_panel_has_focus(self):
+        fw = QApplication.focusWidget()
+        if fw is None:
+            return False
+        return (
+            fw is self.layer_panel.tree
+            or self.layer_panel.tree.isAncestorOf(fw)
+            or self.layer_panel.isAncestorOf(fw)
+        )
+
+    def _forward_text_shortcut(self, method_name):
+        fw = QApplication.focusWidget()
+        if fw is None:
+            return False
+        method = getattr(fw, method_name, None)
+        if callable(method):
+            try:
+                method()
+                return True
+            except Exception:
+                return False
+        return False
+
+    def on_copy(self):
+        if self._layer_panel_has_focus():
+            self.layer_panel.copy_selected_node()
+        elif self._forward_text_shortcut("copy"):
+            return
+        else:
+            ClipboardUtils.copy(self.canvas.gl_canvas)
+
+    def on_cut(self):
+        if self._layer_panel_has_focus():
+            self.layer_panel.cut_selected_node()
+        elif self._forward_text_shortcut("cut"):
+            return
+        else:
+            ClipboardUtils.cut(self.canvas.gl_canvas)
+
+    def on_paste(self):
+        if self._layer_panel_has_focus():
+            self.layer_panel.paste_node()
+        elif self._forward_text_shortcut("paste"):
+            return
+        else:
+            ClipboardUtils.paste(self.canvas.gl_canvas)
+
+    def on_undo(self):
+        if self._forward_text_shortcut("undo"):
+            return
+        self.canvas.gl_canvas.perform_undo()
+
+    def on_redo(self):
+        if self._forward_text_shortcut("redo"):
+            return
+        self.canvas.gl_canvas.perform_redo()
         
     def start_generation(self, prompt, neg, size):
         self.gen_status.start_loading()
@@ -109,6 +179,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Image copied to clipboard.")
 
     def add_generated_layer(self, qimage):
+        before_state = self.canvas.gl_canvas.begin_history_action()
         # Convert QImage to PIL
         from PyQt6.QtCore import QBuffer, QIODevice
         buffer = QBuffer()
@@ -134,6 +205,7 @@ class MainWindow(QMainWindow):
         self.canvas.active_layer = new_layer
         self.canvas.layer_structure_changed.emit()
         self.canvas.update()
+        self.canvas.gl_canvas.end_history_action(before_state, "Insert AI Generated Layer")
         self.statusBar().showMessage("Image added as new layer.")
 
     def apply_ui_scale(self):
@@ -167,6 +239,31 @@ class MainWindow(QMainWindow):
         self.act_settings.triggered.connect(self.on_settings)
         
         # Edit Actions
+        self.act_undo = QAction("Undo", self)
+        self.act_undo.setShortcut(QKeySequence.StandardKey.Undo)
+        self.act_undo.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.act_undo.triggered.connect(self.on_undo)
+
+        self.act_redo = QAction("Redo", self)
+        self.act_redo.setShortcut(QKeySequence.StandardKey.Redo)
+        self.act_redo.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.act_redo.triggered.connect(self.on_redo)
+
+        self.act_copy = QAction("Copy", self)
+        self.act_copy.setShortcut(QKeySequence.StandardKey.Copy)
+        self.act_copy.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.act_copy.triggered.connect(self.on_copy)
+
+        self.act_cut = QAction("Cut", self)
+        self.act_cut.setShortcut(QKeySequence.StandardKey.Cut)
+        self.act_cut.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.act_cut.triggered.connect(self.on_cut)
+
+        self.act_paste = QAction("Paste", self)
+        self.act_paste.setShortcut(QKeySequence.StandardKey.Paste)
+        self.act_paste.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.act_paste.triggered.connect(self.on_paste)
+
         self.act_hsl = QAction("HSL Adjustment...", self)
         self.act_hsl.triggered.connect(lambda: self.canvas.gl_canvas.open_adjustment("HSL"))
         
@@ -199,6 +296,13 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_settings)
         
         edit_menu = bar.addMenu("&Edit")
+        edit_menu.addAction(self.act_undo)
+        edit_menu.addAction(self.act_redo)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.act_copy)
+        edit_menu.addAction(self.act_cut)
+        edit_menu.addAction(self.act_paste)
+        edit_menu.addSeparator()
         edit_menu.addAction(self.act_hsl)
         edit_menu.addAction(self.act_contrast)
         edit_menu.addAction(self.act_exposure)
@@ -220,6 +324,10 @@ class MainWindow(QMainWindow):
         # Hook up the AI button manually
         self.left_sidebar.ai_panel.btn_generate.disconnect() 
         self.left_sidebar.ai_panel.btn_generate.clicked.connect(self.on_open_generator_dialog)
+        self.left_sidebar.ai_panel.btn_auto_sketch.clicked.connect(self.on_auto_sketch)
+        self.left_sidebar.ai_panel.btn_auto_color.clicked.connect(self.on_auto_color)
+        self.left_sidebar.ai_panel.btn_auto_optimize.clicked.connect(self.on_auto_optimize)
+        self.left_sidebar.ai_panel.btn_auto_resolution.clicked.connect(self.on_auto_resolution)
 
         self.dock_left.setWidget(self.left_sidebar)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock_left)

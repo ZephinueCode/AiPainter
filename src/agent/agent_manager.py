@@ -16,6 +16,8 @@ _DEFAULT_MODELS = {
     "edit_model": "qwen-image-2.0",
     "inpaint_model": "wanx2.1-imageedit",
     "layered_model": "qwen/qwen-image-layered",
+    "superres_general_model_path": "models/RealESRGAN_x4plus.pth",
+    "superres_illustration_model_path": "models/realesr-animevideov3.pth",
 }
 
 _DEFAULT_REPLICATE_API_KEY = ""
@@ -45,6 +47,8 @@ class AIAgentManager:
         self.edit_model = _DEFAULT_MODELS["edit_model"]
         self.inpaint_model = _DEFAULT_MODELS["inpaint_model"]
         self.layered_model = _DEFAULT_MODELS["layered_model"]
+        self.superres_general_model_path = _DEFAULT_MODELS["superres_general_model_path"]
+        self.superres_illustration_model_path = _DEFAULT_MODELS["superres_illustration_model_path"]
         self.load_config()
         self._initialized = True
 
@@ -67,6 +71,15 @@ class AIAgentManager:
                     self.edit_model = ai_conf.get("edit_model", _DEFAULT_MODELS["edit_model"])
                     self.inpaint_model = ai_conf.get("inpaint_model", _DEFAULT_MODELS["inpaint_model"])
                     self.layered_model = ai_conf.get("layered_model", _DEFAULT_MODELS["layered_model"])
+                    legacy_superres = ai_conf.get("superres_model_path", "")
+                    self.superres_general_model_path = ai_conf.get(
+                        "superres_general_model_path",
+                        _DEFAULT_MODELS["superres_general_model_path"],
+                    )
+                    self.superres_illustration_model_path = ai_conf.get(
+                        "superres_illustration_model_path",
+                        legacy_superres if legacy_superres else _DEFAULT_MODELS["superres_illustration_model_path"],
+                    )
                     self.replicate_api_key = ai_conf.get("replicate_api_key", "")
                     
                     if "dashscope" in self.base_url or "aliyuncs" in self.base_url:
@@ -87,11 +100,14 @@ class AIAgentManager:
             self.edit_model = _DEFAULT_MODELS["edit_model"]
             self.inpaint_model = _DEFAULT_MODELS["inpaint_model"]
             self.layered_model = _DEFAULT_MODELS["layered_model"]
+            self.superres_general_model_path = _DEFAULT_MODELS["superres_general_model_path"]
+            self.superres_illustration_model_path = _DEFAULT_MODELS["superres_illustration_model_path"]
             self.replicate_api_key = _DEFAULT_REPLICATE_API_KEY
 
     def save_config(self, base_url, api_key, model, proxy="",
                         edit_model=None, inpaint_model=None, layered_model=None,
-                        replicate_api_key=None):
+                        replicate_api_key=None, superres_general_model_path=None,
+                        superres_illustration_model_path=None):
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
@@ -106,6 +122,10 @@ class AIAgentManager:
             self.layered_model = layered_model
         if replicate_api_key is not None:
             self.replicate_api_key = replicate_api_key
+        if superres_general_model_path is not None:
+            self.superres_general_model_path = superres_general_model_path
+        if superres_illustration_model_path is not None:
+            self.superres_illustration_model_path = superres_illustration_model_path
         
         if "dashscope" in self.base_url or "aliyuncs" in self.base_url:
             self.provider = "dashscope"
@@ -130,6 +150,8 @@ class AIAgentManager:
             "inpaint_model": self.inpaint_model,
             "layered_model": self.layered_model,
             "replicate_api_key": self.replicate_api_key,
+            "superres_general_model_path": self.superres_general_model_path,
+            "superres_illustration_model_path": self.superres_illustration_model_path,
         }
         
         try:

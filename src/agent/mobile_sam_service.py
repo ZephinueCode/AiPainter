@@ -20,13 +20,14 @@ class ModelLoadThread(QThread):
     progress_msg = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str, object)  # (success?, message, model_or_None)
 
-    def __init__(self, model_name='mobile_sam.pt'):
+    def __init__(self, model_name='models/mobile_sam.pt'):
         super().__init__()
         self.model_name = model_name
 
     def run(self):
         try:
             self.progress_msg.emit("Loading MobileSAM model (first run will download ~10 MB)...")
+            Path(self.model_name).parent.mkdir(parents=True, exist_ok=True)
 
             from ultralytics import SAM
             model = SAM(self.model_name)
@@ -112,7 +113,8 @@ class MobileSAMService(QObject):
         self._model = None
         self._loading = False
         self._load_thread = None
-        self._model_name = 'mobile_sam.pt'
+        self._model_name = str(Path("models") / "mobile_sam.pt")
+        self._legacy_model_name = "mobile_sam.pt"
 
     # ── Properties ─────────────────────────────────────────
 
@@ -130,12 +132,13 @@ class MobileSAMService(QObject):
         """Try to locate the downloaded model file."""
         possible = [
             Path(self._model_name),
-            Path.home() / '.ultralytics' / self._model_name,
+            Path(self._legacy_model_name),
+            Path.home() / '.ultralytics' / Path(self._model_name).name,
         ]
         # Windows AppData
         if sys.platform == 'win32':
-            possible.append(Path(os.environ.get('APPDATA', '')) / 'ultralytics' / self._model_name)
-            possible.append(Path(os.environ.get('USERPROFILE', '')) / self._model_name)
+            possible.append(Path(os.environ.get('APPDATA', '')) / 'ultralytics' / Path(self._model_name).name)
+            possible.append(Path(os.environ.get('USERPROFILE', '')) / Path(self._model_name).name)
 
         for p in possible:
             if p.exists():

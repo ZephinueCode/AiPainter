@@ -71,9 +71,10 @@ class ClipboardUtils:
 
     # ------------------------------------------------------------------ copy
     @staticmethod
-    def copy(canvas):
+    def copy(canvas, record_history=True):
         if not canvas.active_layer:
             return False
+        before_state = canvas.begin_history_action() if record_history else None
 
         # Check if there is a floating selection on the active tool.
         # If so, copy the floating content instead of the layer pixels.
@@ -147,13 +148,19 @@ class ClipboardUtils:
             pass
 
         canvas.update()
+        if record_history:
+            canvas.end_history_action(before_state, "Copy")
         return True
 
     # ------------------------------------------------------------------- cut
     @staticmethod
-    def cut(canvas):
+    def cut(canvas, record_history=True):
+        before_state = canvas.begin_history_action() if record_history else None
         if not canvas.active_layer or canvas.active_layer.__class__.__name__ == 'GroupLayer':
-            return ClipboardUtils.copy(canvas)
+            ok = ClipboardUtils.copy(canvas, record_history=False)
+            if record_history and ok:
+                canvas.end_history_action(before_state, "Cut")
+            return ok
 
         tool = canvas.active_tool
         floating = (tool and hasattr(tool, 'floating_items') and tool.floating_items)
@@ -161,15 +168,17 @@ class ClipboardUtils:
         if floating:
             # Floating overlay exists — copy its content then discard it.
             # copy() already discards floating items and restores snapshots.
-            ClipboardUtils.copy(canvas)
+            ClipboardUtils.copy(canvas, record_history=False)
             canvas._clip_was_cut = True
             canvas.update()
+            if record_history:
+                canvas.end_history_action(before_state, "Cut")
             return True
 
         # Normal path: no floating items — grab mask before copy clears it
         mask = ClipboardUtils.get_selection_mask(canvas)
 
-        ClipboardUtils.copy(canvas)
+        ClipboardUtils.copy(canvas, record_history=False)
         canvas._clip_was_cut = True
 
         # Erase selected area from layer
@@ -188,15 +197,15 @@ class ClipboardUtils:
         else:
             new_img = Image.new("RGBA", old_img.size, (0, 0, 0, 0))
 
-        cmd = PaintCommand(canvas.active_layer, old_img, new_img)
-        canvas.undo_stack.push(cmd)
         canvas.active_layer.load_from_image(new_img)
         canvas.update()
+        if record_history:
+            canvas.end_history_action(before_state, "Cut")
         return True
 
     # ----------------------------------------------------------------- paste
     @staticmethod
-    def paste(canvas, at_position=None):
+    def paste(canvas, at_position=None, record_history=True):
         """Paste as a floating selection on the active SelectionTool.
 
         Parameters
@@ -206,6 +215,7 @@ class ClipboardUtils:
             *document-space* coordinate.  Otherwise use the original offset
             (cut) or a slight duplicate-offset (copy).
         """
+        before_state = canvas.begin_history_action() if record_history else None
         clip_img = getattr(canvas, '_clip_image', None)
 
         # Fallback: try system clipboard (e.g. paste from external app)
@@ -254,7 +264,7 @@ class ClipboardUtils:
         tool = canvas.active_tool
         if tool and hasattr(tool, 'floating_items'):
             # Commit any previous floating transform first
-            tool.commit_transform()
+            tool.commit_transform(record_history=False)
 
             tool.tf_pos = QPointF(px, py)
             tool.tf_rotation = 0.0
@@ -280,11 +290,11 @@ class ClipboardUtils:
                 old_img = target.get_image()
                 new_img = old_img.copy()
                 new_img.paste(clip_img, (px, py), clip_img)
-                cmd = PaintCommand(target, old_img, new_img)
-                canvas.undo_stack.push(cmd)
                 target.load_from_image(new_img)
 
         canvas.update()
+        if record_history:
+            canvas.end_history_action(before_state, "Paste")
 
 # === Base Tool ===
 class Tool:
@@ -347,17 +357,23 @@ class SelectionTool(Tool):
         self.cache_tf_pos = QPointF(0,0)
         self.cache_tf_scale = QPointF(1,1)
         self.cache_tf_rot = 0.0
+        self._create_before_state = None
+        self._transform_before_state = None
 
     def has_selection(self):
         return not self.selection_path.isEmpty()
     
     def clear_selection(self):
-        self.commit_transform()
+        if self.selection_path.isEmpty() and not self.floating_items:
+            return
+        before_state = self.canvas.begin_history_action()
+        self.commit_transform(record_history=False)
         self.selection_path = QPainterPath()
         if hasattr(self.canvas, 'selection_feather_mask'):
             self.canvas.selection_feather_mask = None
         self.state = self.STATE_IDLE
         self.canvas.update()
+        self.canvas.end_history_action(before_state, "Clear Selection")
 
     def _collect_layers(self, node, layers):
         """Recursively collect PaintLayers from a Group using name check for robustness"""
@@ -438,11 +454,12 @@ class SelectionTool(Tool):
             except Exception as e:
                 print(f"Error lifting layer {layer.name}: {e}")
 
-    def commit_transform(self):
+    def commit_transform(self, record_history=True):
         if not self.floating_items: 
             self.tf_rotation = 0.0
             self.tf_scale = QPointF(1.0, 1.0)
             return
+        before_state = self.canvas.begin_history_action() if record_history else None
         
         w, h = self.canvas.doc_width, self.canvas.doc_height
         
@@ -475,14 +492,12 @@ class SelectionTool(Tool):
             
             curr = item['layer'].get_image()
             curr.alpha_composite(pasted)
-            
-            cmd = PaintCommand(item['layer'], item['snapshot'], curr)
-            self.canvas.undo_stack.push(cmd)
-            
             item['layer'].load_from_image(curr)
         
         self.floating_items = []
         self.canvas.update()
+        if record_history:
+            self.canvas.end_history_action(before_state, "Commit Selection Transform")
 
     def _get_current_transform(self):
         bbox = self.base_path.boundingRect()
@@ -546,7 +561,8 @@ class SelectionTool(Tool):
         return None
 
     def start_creating(self, pos):
-        self.commit_transform()
+        self.commit_transform(record_history=False)
+        self._create_before_state = self.canvas.begin_history_action()
         self.selection_path = QPainterPath()
         if hasattr(self.canvas, 'selection_feather_mask'):
             self.canvas.selection_feather_mask = None
@@ -559,6 +575,8 @@ class SelectionTool(Tool):
     def finish_creating(self):
         if self.selection_path.isEmpty(): self.state = self.STATE_IDLE
         else: self.state = self.STATE_IDLE
+        self.canvas.end_history_action(self._create_before_state, "Create Selection")
+        self._create_before_state = None
 
     # --- Interaction ---
     def mouse_press(self, event, pos, layer_pos):
@@ -570,6 +588,7 @@ class SelectionTool(Tool):
             if self.has_selection():
                 hit = self._hit_test(layer_pos)
                 if hit:
+                    self._transform_before_state = self.canvas.begin_history_action()
                     self._lift_selection()
                     # Check floating items only if we had targets to lift
                     # If empty targets (empty group), just transform box
@@ -612,6 +631,8 @@ class SelectionTool(Tool):
         elif self.state == self.STATE_TRANSFORMING:
             self.state = self.STATE_IDLE
             self.transform_mode = None
+            self.canvas.end_history_action(self._transform_before_state, "Transform Selection")
+            self._transform_before_state = None
 
     def update_transform(self, pos):
         delta = pos - self.start_mouse_pos
@@ -716,6 +737,7 @@ class SelectionTool(Tool):
         if not layer or layer.__class__.__name__ != 'PaintLayer':
             return
 
+        before_state = self.canvas.begin_history_action()
         self.canvas.makeCurrent()
         mask = ClipboardUtils.get_selection_mask(self.canvas)
         if mask is None:
@@ -729,8 +751,6 @@ class SelectionTool(Tool):
         img_arr[..., 3] *= mask_arr
         new_img = Image.fromarray(img_arr.clip(0, 255).astype(np.uint8), "RGBA")
 
-        cmd = PaintCommand(layer, old_img, new_img)
-        self.canvas.undo_stack.push(cmd)
         layer.load_from_image(new_img)
 
         # Clear the feather gradient mask so the next _lift_selection uses
@@ -740,14 +760,17 @@ class SelectionTool(Tool):
             self.canvas.selection_feather_mask = None
 
         self.canvas.update()
+        self.canvas.end_history_action(before_state, "Delete Rest")
 
     def _menu_tf(self, angle):
+        before_state = self.canvas.begin_history_action()
         self._lift_selection()
         # Allows rotating empty box
         self.tf_rotation += angle
         t = self._get_current_transform()
         self.selection_path = t.map(self.base_path)
-        self.commit_transform()
+        self.commit_transform(record_history=False)
+        self.canvas.end_history_action(before_state, "Rotate Selection")
 
 # === Concrete Selection Tools ===
 class RectSelectTool(SelectionTool):

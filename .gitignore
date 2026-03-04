@@ -6,3 +6,4 @@ src/gui/__pycache__/
 src/agent/__pycache__/
 config/
 brushes/
+models/

@@ -6,10 +6,11 @@ openai
 psd-tools
 sortedcontainers
 dashscope
-pytoshop
 six
 packbits
 replicate
 ultralytics
 requests
 scipy
+realesrgan
+basicsr

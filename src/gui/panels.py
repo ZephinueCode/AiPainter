@@ -3,12 +3,12 @@
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QTreeWidget, QTreeWidgetItem, QListWidget, QListWidgetItem, 
                              QGroupBox, QLabel, QSlider, QInputDialog, QFrame, QGridLayout,
-                             QAbstractItemView, QMenu, QMessageBox)
+                             QAbstractItemView, QMenu, QMessageBox, QSplitter, QScrollArea)
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap, QImage
 from src.gui.widgets import ColorPickerWidget
 from src.core.brush_manager import BrushConfig
-from src.core.logic import GroupLayer, PaintLayer, PaintCommand
+from src.core.logic import GroupLayer, PaintLayer, PaintCommand, TextLayer
 from src.gui.dialogs import AIGenerateDialog
 from src.core.processor import ImageProcessor
 import io
@@ -94,13 +94,13 @@ class ToolsPanel(QWidget):
 
         # ASCII Icons & Single Column
         tools = [
-            ("Rect Select", "[ ]"), 
-            ("Lasso", " @ "),
-            ("Magic Wand", " ✦ "),
-            ("Fill Select", "\\_/"),
-            ("Picker", " + "),
-            ("Smudge", " ~ "),
-            ("Text", " T ")
+            "Rect Select",
+            "Lasso",
+            "Magic Wand",
+            "Fill Select",
+            "Picker",
+            "Smudge",
+            "Text",
         ]
         
         _normal_style = (
@@ -109,8 +109,8 @@ class ToolsPanel(QWidget):
             "QPushButton:checked { background-color: #c0d8f0; border: 1px solid #6aa0d0; }"
         )
         
-        for name, icon in tools:
-            btn = QPushButton(f"{icon}  {name}")
+        for name in tools:
+            btn = QPushButton(name)
             btn.setMinimumHeight(45)
             btn.setStyleSheet(_normal_style)
             btn.setCheckable(True)
@@ -119,7 +119,7 @@ class ToolsPanel(QWidget):
             self._tool_buttons[name] = btn
 
         # === Magic Wand Options Panel (hidden by default) ===
-        self.wand_panel = QGroupBox("🪄 AI Wand Options")
+        self.wand_panel = QGroupBox("AI Wand Options")
         self.wand_panel.setVisible(False)
         wand_layout = QVBoxLayout(self.wand_panel)
         wand_layout.setContentsMargins(8, 8, 8, 8)
@@ -135,9 +135,9 @@ class ToolsPanel(QWidget):
         mode_layout = QHBoxLayout()
         from PyQt6.QtWidgets import QRadioButton, QButtonGroup
         self._wand_mode_group = QButtonGroup(self)
-        self._wand_positive = QRadioButton("✅ Positive")
+        self._wand_positive = QRadioButton("Positive")
         self._wand_positive.setChecked(True)
-        self._wand_negative = QRadioButton("❌ Negative")
+        self._wand_negative = QRadioButton("Negative")
         self._wand_mode_group.addButton(self._wand_positive, 1)
         self._wand_mode_group.addButton(self._wand_negative, 0)
         mode_layout.addWidget(self._wand_positive)
@@ -159,15 +159,15 @@ class ToolsPanel(QWidget):
 
         # Buttons
         btn_row1 = QHBoxLayout()
-        self._wand_undo_btn = QPushButton("↩ Undo")
+        self._wand_undo_btn = QPushButton("Undo")
         self._wand_undo_btn.clicked.connect(self._on_wand_undo)
         btn_row1.addWidget(self._wand_undo_btn)
-        self._wand_clear_btn = QPushButton("🗑 Clear")
+        self._wand_clear_btn = QPushButton("Clear")
         self._wand_clear_btn.clicked.connect(self._on_wand_clear)
         btn_row1.addWidget(self._wand_clear_btn)
         wand_layout.addLayout(btn_row1)
 
-        self._wand_apply_btn = QPushButton("✔ Apply Selection")
+        self._wand_apply_btn = QPushButton("Apply Selection")
         self._wand_apply_btn.setStyleSheet(
             "QPushButton { background-color: #4a9eff; color: white; font-weight: bold; padding: 6px; border-radius: 3px; }"
             "QPushButton:hover { background-color: #3a8eef; }"
@@ -278,15 +278,36 @@ class AIPanel(QWidget):
         lbl.setStyleSheet("font-weight: bold; color: #666;")
         layout.addWidget(lbl)
         
-        self.btn_generate = QPushButton("▲ Auto Generate")
+        btn_style = (
+            "QPushButton { text-align: left; padding-left: 20px; font-family: monospace; font-size: 13px; }"
+            "QPushButton:hover { background-color: #e0e0e0; }"
+        )
+
+        self.btn_generate = QPushButton("Auto Generate")
         self.btn_generate.setMinimumHeight(45)
-        self.btn_generate.setStyleSheet("""
-            QPushButton { text-align: left; padding-left: 20px; font-family: monospace; font-size: 13px; }
-            QPushButton:hover { background-color: #e0e0e0; }
-        """)
+        self.btn_generate.setStyleSheet(btn_style)
         self.btn_generate.clicked.connect(self.open_generator)
+        self.btn_auto_sketch = QPushButton("Auto Sketch")
+        self.btn_auto_sketch.setMinimumHeight(40)
+        self.btn_auto_sketch.setStyleSheet(btn_style)
+
+        self.btn_auto_color = QPushButton("Auto Color")
+        self.btn_auto_color.setMinimumHeight(40)
+        self.btn_auto_color.setStyleSheet(btn_style)
+
+        self.btn_auto_optimize = QPushButton("Auto Optimize")
+        self.btn_auto_optimize.setMinimumHeight(40)
+        self.btn_auto_optimize.setStyleSheet(btn_style)
+
+        self.btn_auto_resolution = QPushButton("Auto Resolution")
+        self.btn_auto_resolution.setMinimumHeight(40)
+        self.btn_auto_resolution.setStyleSheet(btn_style)
         
         layout.addWidget(self.btn_generate)
+        layout.addWidget(self.btn_auto_sketch)
+        layout.addWidget(self.btn_auto_color)
+        layout.addWidget(self.btn_auto_optimize)
+        layout.addWidget(self.btn_auto_resolution)
         layout.addStretch()
 
     def open_generator(self):
@@ -304,21 +325,30 @@ class LeftSidebar(QWidget):
         layout.setSpacing(0)
 
         self.brush_panel = BrushPanel(brush_manager, on_brush_selected)
-        layout.addWidget(self.brush_panel, 1)
-        
-        self._add_divider(layout)
-
         self.tools_panel = ToolsPanel(self._on_tool_selected_wrapper)
-        layout.addWidget(self.tools_panel, 1)
+        self.ai_panel = AIPanel()
 
-        # Cross-wire brush ↔ tool pressed-state exclusion
+        self.splitter = QSplitter(Qt.Orientation.Vertical)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setHandleWidth(6)
+        self.splitter.addWidget(self._wrap_scroll_panel(self.brush_panel))
+        self.splitter.addWidget(self._wrap_scroll_panel(self.tools_panel))
+        self.splitter.addWidget(self._wrap_scroll_panel(self.ai_panel))
+        self.splitter.setSizes([320, 320, 220])
+        layout.addWidget(self.splitter, 1)
+
+        # Cross-wire brush -> tool pressed-state exclusion
         self.brush_panel._on_brush_activated_cb = self._on_brush_activated
         self.tools_panel._on_tool_activated_cb = self._on_tool_activated
 
-        self._add_divider(layout)
-
-        self.ai_panel = AIPanel()
-        layout.addWidget(self.ai_panel, 1)
+    def _wrap_scroll_panel(self, panel):
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        area.setWidget(panel)
+        return area
 
     def _on_tool_selected_wrapper(self, tool_name):
         """Intercept tool selection to wire up the magic wand tool reference."""
@@ -335,12 +365,12 @@ class LeftSidebar(QWidget):
             self.tools_panel.set_magic_wand_tool_ref(None)
 
     def _on_brush_activated(self):
-        """Called when a brush is clicked — clear tool pressed state."""
+        """Called when a brush is clicked 鈥?clear tool pressed state."""
         self.tools_panel.clear_active_button()
         self.tools_panel.wand_panel.setVisible(False)
 
     def _on_tool_activated(self):
-        """Called when a tool is clicked — clear brush tree selection."""
+        """Called when a tool is clicked 鈥?clear brush tree selection."""
         self.brush_panel.clear_selection()
 
     def _on_tool_auto_switched(self, tool_name):
@@ -362,6 +392,9 @@ class LayerPanel(QWidget):
         super().__init__()
         self.canvas = canvas
         self.canvas.layer_structure_changed.connect(self.refresh)
+        self._node_clipboard = None
+        self._node_clipboard_was_cut = False
+        self._opacity_before_state = None
         
         layout = QVBoxLayout(self); layout.setContentsMargins(5,5,5,5)
         
@@ -372,6 +405,8 @@ class LayerPanel(QWidget):
         self.opacity_slider.setRange(0, 100)
         self.opacity_slider.setValue(100)
         self.opacity_slider.valueChanged.connect(self._on_opacity_change)
+        self.opacity_slider.sliderPressed.connect(self._on_opacity_begin)
+        self.opacity_slider.sliderReleased.connect(self._on_opacity_end)
         op_layout.addWidget(self.opacity_slider)
         self.lbl_opacity_val = QLabel("100%")
         self.lbl_opacity_val.setFixedWidth(35)
@@ -396,13 +431,23 @@ class LayerPanel(QWidget):
         original_drop_event = self.tree.dropEvent
         
         def new_drop_event(event):
+            before_state = self._gl().begin_history_action()
             # 1. Perform UI Drop
             original_drop_event(event)
             # 2. Sync Logic
             self._sync_logical_structure()
-            
+            self._gl().end_history_action(before_state, "Reorder Layers")
+             
         self.tree.dropEvent = new_drop_event
         # -----------------------------------------------------
+        original_tree_keypress = self.tree.keyPressEvent
+
+        def new_tree_keypress(event):
+            if self._handle_tree_shortcut(event):
+                return
+            original_tree_keypress(event)
+
+        self.tree.keyPressEvent = new_tree_keypress
 
         self.tree.itemDoubleClicked.connect(self._rename_item)
         self.tree.currentItemChanged.connect(self._on_select)
@@ -424,6 +469,148 @@ class LayerPanel(QWidget):
         btn_layout.addWidget(self.btn_merge)
         btn_layout.addWidget(self.btn_del)
         layout.addLayout(btn_layout)
+
+    def _gl(self):
+        return self.canvas.gl_canvas if hasattr(self.canvas, 'gl_canvas') else self.canvas
+
+    def _handle_tree_shortcut(self, event):
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self._del_node()
+            event.accept()
+            return True
+        return False
+
+    def _snapshot_node(self, node):
+        if isinstance(node, GroupLayer):
+            return {
+                "type": "GroupLayer",
+                "name": node.name,
+                "visible": bool(node.visible),
+                "opacity": float(node.opacity),
+                "children": [self._snapshot_node(child) for child in node.children],
+            }
+
+        if isinstance(node, TextLayer):
+            return {
+                "type": "TextLayer",
+                "name": node.name,
+                "visible": bool(node.visible),
+                "opacity": float(node.opacity),
+                "uuid": getattr(node, "uuid", None),
+                "text_content": node.text_content,
+                "font_size": node.font_size,
+                "text_color": node.text_color,
+                "pos_x": node.pos_x,
+                "pos_y": node.pos_y,
+                "image": node.get_image().copy(),
+            }
+
+        return {
+            "type": "PaintLayer",
+            "name": node.name,
+            "visible": bool(node.visible),
+            "opacity": float(node.opacity),
+            "uuid": getattr(node, "uuid", None),
+            "image": node.get_image().copy(),
+        }
+
+    def _restore_node(self, data):
+        typ = data.get("type")
+        if typ == "GroupLayer":
+            grp = GroupLayer(data.get("name", "Group"))
+            grp.visible = bool(data.get("visible", True))
+            grp.opacity = float(data.get("opacity", 1.0))
+            for child in data.get("children", []):
+                grp.add_child(self._restore_node(child))
+            return grp
+
+        if typ == "TextLayer":
+            node = TextLayer(
+                self.canvas.doc_width,
+                self.canvas.doc_height,
+                text=data.get("text_content", "Text"),
+                font_size=data.get("font_size", 50),
+                color=data.get("text_color", (0, 0, 0, 255)),
+                x=data.get("pos_x", 0),
+                y=data.get("pos_y", 0),
+                name=data.get("name", "Text Layer"),
+            )
+        else:
+            node = PaintLayer(self.canvas.doc_width, self.canvas.doc_height, data.get("name", "Layer"))
+
+        node.visible = bool(data.get("visible", True))
+        node.opacity = float(data.get("opacity", 1.0))
+        node.uuid = data.get("uuid")
+        img = data.get("image")
+        if img is not None:
+            node.load_from_image(img.copy())
+        return node
+
+    def copy_selected_node(self):
+        curr = self.tree.currentItem()
+        if not curr:
+            return False
+        node = curr.data(0, Qt.ItemDataRole.UserRole)
+        if not node or node == self.canvas.root:
+            return False
+        gl = self._gl()
+        gl.makeCurrent()
+        self._node_clipboard = self._snapshot_node(node)
+        self._node_clipboard_was_cut = False
+        return True
+
+    def cut_selected_node(self):
+        curr = self.tree.currentItem()
+        if not curr:
+            return False
+        node = curr.data(0, Qt.ItemDataRole.UserRole)
+        if not node or node == self.canvas.root or node.parent is None:
+            return False
+        if not self.copy_selected_node():
+            return False
+        self._node_clipboard_was_cut = True
+        before_state = self._gl().begin_history_action()
+        node.parent.remove_child(node)
+        self.canvas.active_layer = None
+        self.canvas.layer_structure_changed.emit()
+        self.canvas.update()
+        self._gl().end_history_action(before_state, "Cut Layer Node")
+        return True
+
+    def paste_node(self):
+        if self._node_clipboard is None:
+            return False
+
+        gl = self._gl()
+        gl.makeCurrent()
+        before_state = gl.begin_history_action()
+
+        curr = self.tree.currentItem()
+        target = curr.data(0, Qt.ItemDataRole.UserRole) if curr else self.canvas.root
+
+        if isinstance(target, GroupLayer):
+            parent = target
+            insert_idx = len(parent.children)
+        elif target and target.parent:
+            parent = target.parent
+            insert_idx = parent.children.index(target) + 1
+        else:
+            parent = self.canvas.root
+            insert_idx = len(parent.children)
+
+        pasted = self._restore_node(self._node_clipboard)
+        parent.children.insert(insert_idx, pasted)
+        pasted.parent = parent
+
+        self.canvas.active_layer = pasted
+        self.canvas.layer_structure_changed.emit()
+        self.canvas.update()
+        gl.end_history_action(before_state, "Paste Layer Node")
+
+        if self._node_clipboard_was_cut:
+            self._node_clipboard = None
+            self._node_clipboard_was_cut = False
+        return True
 
     def _update_item_thumbnail(self, item):
         """Helper to update a single item's thumbnail."""
@@ -543,17 +730,18 @@ class LayerPanel(QWidget):
         """Remove white background from a layer using edge flood-fill."""
         from src.core.processor import remove_white_background
 
-        gl = self.canvas.gl_canvas if hasattr(self.canvas, 'gl_canvas') else self.canvas
+        gl = self._gl()
+        before_state = gl.begin_history_action()
         gl.makeCurrent()
 
-        old_img = layer.get_image()
-        new_img = remove_white_background(old_img)
-
-        cmd = PaintCommand(layer, old_img, new_img)
-        gl.undo_stack.push(cmd)
+        new_img = remove_white_background(layer.get_image())
         layer.load_from_image(new_img)
         self.canvas.update()
         self.refresh()  # update thumbnail
+        gl.end_history_action(before_state, "Remove White Background")
+
+    def _on_opacity_begin(self):
+        self._opacity_before_state = self._gl().begin_history_action()
 
     def _on_opacity_change(self, value):
         opacity = value / 100.0
@@ -562,6 +750,10 @@ class LayerPanel(QWidget):
         if self.canvas.active_layer:
             self.canvas.active_layer.opacity = opacity
             self.canvas.update()
+
+    def _on_opacity_end(self):
+        self._gl().end_history_action(self._opacity_before_state, "Change Opacity")
+        self._opacity_before_state = None
 
     def _sync_logical_structure(self):
         """Rebuilds the Canvas logical tree based on the current UI TreeWidget structure."""
@@ -612,6 +804,7 @@ class LayerPanel(QWidget):
     def _on_data_change(self, item, col):
         node = item.data(0, Qt.ItemDataRole.UserRole)
         if node:
+            before_state = self._gl().begin_history_action()
             is_checked = (item.checkState(0) == Qt.CheckState.Checked)
             node.visible = is_checked
             if isinstance(node, GroupLayer):
@@ -619,6 +812,7 @@ class LayerPanel(QWidget):
                 self._set_node_visibility_recursive(item, is_checked)
                 self.tree.blockSignals(False)
             self.canvas.update()
+            self._gl().end_history_action(before_state, "Toggle Visibility")
 
     def _set_node_visibility_recursive(self, parent_item, visible):
         for i in range(parent_item.childCount()):
@@ -636,12 +830,15 @@ class LayerPanel(QWidget):
         node = item.data(0, Qt.ItemDataRole.UserRole)
         text, ok = QInputDialog.getText(self, "Rename", "Name:", text=node.name)
         if ok and text:
+            before_state = self._gl().begin_history_action()
             node.name = text
             item.setText(0, text)
             if isinstance(node, GroupLayer):
                 item.setText(0, f"> {text}")
+            self._gl().end_history_action(before_state, "Rename Layer")
 
     def _add_layer(self):
+        before_state = self._gl().begin_history_action()
         curr = self.tree.currentItem()
         target = curr.data(0, Qt.ItemDataRole.UserRole) if curr else self.canvas.root
         
@@ -655,21 +852,28 @@ class LayerPanel(QWidget):
         self.canvas.active_layer = new_l
         self.canvas.layer_structure_changed.emit()
         self.canvas.update()
+        self._gl().end_history_action(before_state, "Add Layer")
 
     def _add_group(self):
+        before_state = self._gl().begin_history_action()
         grp = GroupLayer("New Group")
         self.canvas.root.add_child(grp)
         self.canvas.layer_structure_changed.emit()
+        self.canvas.active_layer = grp
+        self.canvas.update()
+        self._gl().end_history_action(before_state, "Add Group")
 
     def _del_node(self):
         curr = self.tree.currentItem()
         if not curr: return
         node = curr.data(0, Qt.ItemDataRole.UserRole)
         if node and node.parent:
+            before_state = self._gl().begin_history_action()
             node.parent.remove_child(node)
             self.canvas.active_layer = None
             self.canvas.layer_structure_changed.emit()
             self.canvas.update()
+            self._gl().end_history_action(before_state, "Delete Node")
 
     def _merge_layers(self):
         """Button handler: smart merge based on what's selected."""
@@ -690,6 +894,7 @@ class LayerPanel(QWidget):
     def _merge_down(self, layer):
         """Merge the given PaintLayer with the layer directly below it."""
         from src.core.logic import ProjectLogic
+        before_state = self._gl().begin_history_action()
 
         parent = layer.parent if layer.parent else self.canvas.root
         if layer not in parent.children:
@@ -705,7 +910,7 @@ class LayerPanel(QWidget):
             QMessageBox.warning(self, "Merge Down", "The layer below is not a Paint Layer.\nUse 'Flatten Group' instead.")
             return
 
-        gl = self.canvas.gl_canvas if hasattr(self.canvas, 'gl_canvas') else self.canvas
+        gl = self._gl()
         gl.makeCurrent()
 
         # Merge: below (bottom) + layer (top)
@@ -726,12 +931,14 @@ class LayerPanel(QWidget):
         self.canvas.active_layer = merged
         self.canvas.layer_structure_changed.emit()
         self.canvas.update()
+        gl.end_history_action(before_state, "Merge Down")
 
     def _flatten_group(self, group):
         """Flatten a GroupLayer into a single PaintLayer."""
         from src.core.logic import ProjectLogic
+        before_state = self._gl().begin_history_action()
 
-        gl = self.canvas.gl_canvas if hasattr(self.canvas, 'gl_canvas') else self.canvas
+        gl = self._gl()
         gl.makeCurrent()
 
         merged = ProjectLogic.merge_group(
@@ -752,12 +959,14 @@ class LayerPanel(QWidget):
         self.canvas.active_layer = merged
         self.canvas.layer_structure_changed.emit()
         self.canvas.update()
+        gl.end_history_action(before_state, "Flatten Group")
 
     def _merge_all_visible(self):
         """Merge all visible layers into a single new layer."""
         from src.core.logic import ProjectLogic
+        before_state = self._gl().begin_history_action()
 
-        gl = self.canvas.gl_canvas if hasattr(self.canvas, 'gl_canvas') else self.canvas
+        gl = self._gl()
         gl.makeCurrent()
 
         # Collect all visible PaintLayers in render order
@@ -799,6 +1008,7 @@ class LayerPanel(QWidget):
         self.canvas.active_layer = merged
         self.canvas.layer_structure_changed.emit()
         self.canvas.update()
+        gl.end_history_action(before_state, "Merge Visible")
 
 class PropertyPanel(QWidget):
     def __init__(self, canvas):
@@ -846,3 +1056,4 @@ class PropertyPanel(QWidget):
         # Delegate to Central Canvas Logic
         if hasattr(self.canvas, 'gl_canvas'):
             self.canvas.gl_canvas.open_gradient_map()
+

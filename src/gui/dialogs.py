@@ -257,6 +257,14 @@ class SettingsDialog(QDialog):
         self.txt_layered_model = QLineEdit(self.agent_manager.layered_model)
         self.txt_layered_model.setPlaceholderText("e.g. qwen/qwen-image-layered")
         form_models.addRow("Layered (Replicate):", self.txt_layered_model)
+
+        self.txt_sr_general_model_path = QLineEdit(self.agent_manager.superres_general_model_path)
+        self.txt_sr_general_model_path.setPlaceholderText("e.g. models/RealESRGAN_x4plus.pth")
+        form_models.addRow("SR General Model:", self.txt_sr_general_model_path)
+
+        self.txt_sr_illustration_model_path = QLineEdit(self.agent_manager.superres_illustration_model_path)
+        self.txt_sr_illustration_model_path.setPlaceholderText("e.g. models/realesr-animevideov3.pth")
+        form_models.addRow("SR Illustration Model:", self.txt_sr_illustration_model_path)
         
         self.txt_replicate_key = QLineEdit(self.agent_manager.replicate_api_key)
         self.txt_replicate_key.setEchoMode(QLineEdit.EchoMode.Password)
@@ -352,6 +360,8 @@ class SettingsDialog(QDialog):
             inpaint_model=self.txt_inpaint_model.text(),
             layered_model=self.txt_layered_model.text(),
             replicate_api_key=self.txt_replicate_key.text(),
+            superres_general_model_path=self.txt_sr_general_model_path.text(),
+            superres_illustration_model_path=self.txt_sr_illustration_model_path.text(),
         )
         super().accept()
 
@@ -441,6 +451,8 @@ class SettingsDialog(QDialog):
         self.txt_edit_model.setText(_DEFAULT_MODELS["edit_model"])
         self.txt_inpaint_model.setText(_DEFAULT_MODELS["inpaint_model"])
         self.txt_layered_model.setText(_DEFAULT_MODELS["layered_model"])
+        self.txt_sr_general_model_path.setText(_DEFAULT_MODELS["superres_general_model_path"])
+        self.txt_sr_illustration_model_path.setText(_DEFAULT_MODELS["superres_illustration_model_path"])
 
     def get_values(self):
         return {
