@@ -1,6 +1,20 @@
 # src/gui/widgets.py
 
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar, QFrame, QSlider, QGridLayout)
+from PyQt6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QProgressBar,
+    QFrame,
+    QSlider,
+    QGridLayout,
+    QGraphicsEllipseItem,
+    QGraphicsPathItem,
+    QGraphicsScene,
+    QGraphicsView,
+)
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QPointF, QRectF
 from PyQt6.QtGui import (QPainter, QColor, QConicalGradient, QBrush, QPainterPath, QLinearGradient, QPen, QPixmap, QImage, QMouseEvent)
 import math
@@ -248,6 +262,163 @@ class ColorPickerWidget(QWidget):
     def save_to_palette(self, index):
         # Save current color to the button
         self.palette_buttons[index].set_rgb(self.current_rgb)
+
+
+class _CurvePoint(QGraphicsEllipseItem):
+    def __init__(self, x, y, radius=4, lock_x=False, parent=None):
+        super().__init__(-radius, -radius, radius * 2, radius * 2, parent)
+        self.setPos(x, y)
+        self.lock_x = lock_x
+        self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable)
+        self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemSendsGeometryChanges)
+        self.setBrush(QBrush(Qt.GlobalColor.white))
+        self.setPen(QPen(Qt.GlobalColor.black))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsEllipseItem.GraphicsItemChange.ItemPositionChange:
+            x = float(value.x())
+            y = float(value.y())
+            if self.lock_x:
+                x = float(self.pos().x())
+            x = max(0.0, min(255.0, x))
+            y = max(0.0, min(255.0, y))
+            return QPointF(x, y)
+        return super().itemChange(change, value)
+
+
+class PressureCurveEditor(QGraphicsView):
+    curveChanged = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._scene = QGraphicsScene(0, 0, 255, 255)
+        self.setScene(self._scene)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setFixedHeight(160)
+
+        self._curve_item = QGraphicsPathItem()
+        self._curve_item.setPen(QPen(QColor(0, 120, 215), 2))
+        self._scene.addItem(self._curve_item)
+        self._points = []
+        self._draw_grid()
+        self.set_curve_points(None)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.IgnoreAspectRatio)
+
+    def _draw_grid(self):
+        grid_pen = QPen(QColor(205, 205, 205), 1, Qt.PenStyle.DashLine)
+        step = 255 / 4
+        for i in range(1, 4):
+            v = i * step
+            self._scene.addLine(v, 0, v, 255, grid_pen).setZValue(-2)
+            self._scene.addLine(0, v, 255, v, grid_pen).setZValue(-2)
+        self._scene.addLine(0, 255, 255, 0, QPen(QColor(220, 220, 220), 1)).setZValue(-3)
+
+    @staticmethod
+    def _map_y(logical_y):
+        return 255.0 - float(logical_y)
+
+    @staticmethod
+    def _unmap_y(scene_y):
+        return 255.0 - float(scene_y)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            item = self.itemAt(event.pos())
+            super().mousePressEvent(event)
+            if item is None:
+                p = self.mapToScene(event.pos())
+                self._add_point(float(p.x()), self._unmap_y(float(p.y())), emit=False)
+                self._refresh_curve()
+                self.curveChanged.emit()
+            return
+
+        if event.button() == Qt.MouseButton.RightButton:
+            item = self.itemAt(event.pos())
+            if isinstance(item, _CurvePoint):
+                if item.lock_x:
+                    return
+                self._scene.removeItem(item)
+                self._points = [pt for pt in self._points if pt is not item]
+                self._sort_points()
+                self._refresh_curve()
+                self.curveChanged.emit()
+            return
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        if self._scene.mouseGrabberItem():
+            self._sort_points()
+            self._refresh_curve()
+            self.curveChanged.emit()
+
+    def _sort_points(self):
+        self._points.sort(key=lambda p: p.pos().x())
+
+    def _add_point(self, x, y, emit=True):
+        x = max(0.0, min(255.0, float(x)))
+        y = max(0.0, min(255.0, float(y)))
+        for p in self._points:
+            if abs(p.pos().x() - x) < 4.0:
+                return p
+        lock_x = (x <= 0.001) or (x >= 254.999)
+        pt = _CurvePoint(x, self._map_y(y), lock_x=lock_x)
+        self._scene.addItem(pt)
+        self._points.append(pt)
+        self._sort_points()
+        if emit:
+            self._refresh_curve()
+            self.curveChanged.emit()
+        return pt
+
+    def _refresh_curve(self):
+        if len(self._points) < 2:
+            return
+        self._sort_points()
+        path = QPainterPath()
+        p0 = self._points[0].pos()
+        path.moveTo(p0.x(), p0.y())
+        for p in self._points[1:]:
+            path.lineTo(p.pos().x(), p.pos().y())
+        self._curve_item.setPath(path)
+
+    def set_curve_points(self, points_list):
+        for p in self._points:
+            self._scene.removeItem(p)
+        self._points = []
+
+        if not points_list:
+            points_list = [(0, 0), (255, 255)]
+
+        cleaned = []
+        for pair in points_list:
+            if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+                continue
+            cleaned.append((float(pair[0]), float(pair[1])))
+        if len(cleaned) < 2:
+            cleaned = [(0, 0), (255, 255)]
+
+        for x, y in cleaned:
+            self._add_point(x, y, emit=False)
+        if self._points:
+            self._points[0].lock_x = True
+            self._points[-1].lock_x = True
+        self._refresh_curve()
+
+    def get_curve_points(self):
+        self._sort_points()
+        return [
+            (int(round(p.pos().x())), int(round(self._unmap_y(p.pos().y()))))
+            for p in self._points
+        ]
 
 class GradientSlider(QWidget):
     gradientChanged = pyqtSignal(list) # List of (pos, (r,g,b))

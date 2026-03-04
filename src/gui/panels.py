@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QAbstractItemView, QMenu, QMessageBox, QSplitter, QScrollArea)
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap, QImage
-from src.gui.widgets import ColorPickerWidget
+from src.gui.widgets import ColorPickerWidget, PressureCurveEditor
 from src.core.brush_manager import BrushConfig
 from src.core.logic import GroupLayer, PaintLayer, PaintCommand, TextLayer
 from src.gui.dialogs import AIGenerateDialog
@@ -92,7 +92,7 @@ class ToolsPanel(QWidget):
         lbl.setStyleSheet("font-weight: bold; color: #666;")
         layout.addWidget(lbl)
 
-        # ASCII Icons & Single Column
+        # Compact 2-column tool buttons
         tools = [
             "Rect Select",
             "Lasso",
@@ -101,22 +101,30 @@ class ToolsPanel(QWidget):
             "Picker",
             "Smudge",
             "Text",
+            "Liquify",
         ]
         
         _normal_style = (
-            "QPushButton { text-align: left; padding-left: 20px; font-family: monospace; font-size: 13px; }"
+            "QPushButton { text-align: center; padding: 4px 6px; font-size: 12px; }"
             "QPushButton:hover { background-color: #e0e0e0; }"
             "QPushButton:checked { background-color: #c0d8f0; border: 1px solid #6aa0d0; }"
         )
-        
-        for name in tools:
+
+        tool_grid = QGridLayout()
+        tool_grid.setContentsMargins(0, 0, 0, 0)
+        tool_grid.setHorizontalSpacing(6)
+        tool_grid.setVerticalSpacing(6)
+        for idx, name in enumerate(tools):
+            row = idx // 2
+            col = idx % 2
             btn = QPushButton(name)
-            btn.setMinimumHeight(45)
+            btn.setMinimumHeight(32)
             btn.setStyleSheet(_normal_style)
             btn.setCheckable(True)
             btn.clicked.connect(lambda checked, n=name: self._on_tool_btn_clicked(n))
-            layout.addWidget(btn)
+            tool_grid.addWidget(btn, row, col)
             self._tool_buttons[name] = btn
+        layout.addLayout(tool_grid)
 
         # === Magic Wand Options Panel (hidden by default) ===
         self.wand_panel = QGroupBox("AI Wand Options")
@@ -279,35 +287,40 @@ class AIPanel(QWidget):
         layout.addWidget(lbl)
         
         btn_style = (
-            "QPushButton { text-align: left; padding-left: 20px; font-family: monospace; font-size: 13px; }"
+            "QPushButton { text-align: center; padding: 4px 6px; font-size: 12px; }"
             "QPushButton:hover { background-color: #e0e0e0; }"
         )
 
         self.btn_generate = QPushButton("Auto Generate")
-        self.btn_generate.setMinimumHeight(45)
+        self.btn_generate.setMinimumHeight(32)
         self.btn_generate.setStyleSheet(btn_style)
         self.btn_generate.clicked.connect(self.open_generator)
         self.btn_auto_sketch = QPushButton("Auto Sketch")
-        self.btn_auto_sketch.setMinimumHeight(40)
+        self.btn_auto_sketch.setMinimumHeight(32)
         self.btn_auto_sketch.setStyleSheet(btn_style)
 
         self.btn_auto_color = QPushButton("Auto Color")
-        self.btn_auto_color.setMinimumHeight(40)
+        self.btn_auto_color.setMinimumHeight(32)
         self.btn_auto_color.setStyleSheet(btn_style)
 
         self.btn_auto_optimize = QPushButton("Auto Optimize")
-        self.btn_auto_optimize.setMinimumHeight(40)
+        self.btn_auto_optimize.setMinimumHeight(32)
         self.btn_auto_optimize.setStyleSheet(btn_style)
 
         self.btn_auto_resolution = QPushButton("Auto Resolution")
-        self.btn_auto_resolution.setMinimumHeight(40)
+        self.btn_auto_resolution.setMinimumHeight(32)
         self.btn_auto_resolution.setStyleSheet(btn_style)
-        
-        layout.addWidget(self.btn_generate)
-        layout.addWidget(self.btn_auto_sketch)
-        layout.addWidget(self.btn_auto_color)
-        layout.addWidget(self.btn_auto_optimize)
-        layout.addWidget(self.btn_auto_resolution)
+
+        ai_grid = QGridLayout()
+        ai_grid.setContentsMargins(0, 0, 0, 0)
+        ai_grid.setHorizontalSpacing(6)
+        ai_grid.setVerticalSpacing(6)
+        ai_grid.addWidget(self.btn_generate, 0, 0)
+        ai_grid.addWidget(self.btn_auto_sketch, 0, 1)
+        ai_grid.addWidget(self.btn_auto_color, 1, 0)
+        ai_grid.addWidget(self.btn_auto_optimize, 1, 1)
+        ai_grid.addWidget(self.btn_auto_resolution, 2, 0, 1, 2)
+        layout.addLayout(ai_grid)
         layout.addStretch()
 
     def open_generator(self):
@@ -1014,7 +1027,21 @@ class PropertyPanel(QWidget):
     def __init__(self, canvas):
         super().__init__()
         self.canvas = canvas
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        outer_layout.addWidget(scroll)
+
+        content = QWidget()
+        scroll.setWidget(content)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(8)
         
         group_color = QGroupBox("Color")
         l_color = QVBoxLayout(group_color)
@@ -1037,6 +1064,22 @@ class PropertyPanel(QWidget):
         l_brush.addLayout(mk_sl("Size", 1, 300, 10, lambda v: setattr(self.canvas.current_brush, 'size', v) if self.canvas.current_brush else None))
         l_brush.addLayout(mk_sl("Opacity", 0, 100, 100, lambda v: setattr(self.canvas.current_brush, 'opacity', v/100) if self.canvas.current_brush else None))
         l_brush.addLayout(mk_sl("Flow", 0, 100, 100, lambda v: setattr(self.canvas.current_brush, 'flow', v/100) if self.canvas.current_brush else None))
+
+        self.btn_pressure_size = QPushButton("Pressure Size Curve")
+        self.btn_pressure_size.clicked.connect(lambda: self._toggle_pressure_curve('size'))
+        l_brush.addWidget(self.btn_pressure_size)
+        self.pressure_size_editor = PressureCurveEditor()
+        self.pressure_size_editor.hide()
+        self.pressure_size_editor.curveChanged.connect(lambda: self._on_pressure_curve_change('size'))
+        l_brush.addWidget(self.pressure_size_editor)
+
+        self.btn_pressure_opacity = QPushButton("Pressure Opacity Curve")
+        self.btn_pressure_opacity.clicked.connect(lambda: self._toggle_pressure_curve('opacity'))
+        l_brush.addWidget(self.btn_pressure_opacity)
+        self.pressure_opacity_editor = PressureCurveEditor()
+        self.pressure_opacity_editor.hide()
+        self.pressure_opacity_editor.curveChanged.connect(lambda: self._on_pressure_curve_change('opacity'))
+        l_brush.addWidget(self.pressure_opacity_editor)
         layout.addWidget(group_brush)
         
         # --- Adjustments Group ---
@@ -1056,4 +1099,30 @@ class PropertyPanel(QWidget):
         # Delegate to Central Canvas Logic
         if hasattr(self.canvas, 'gl_canvas'):
             self.canvas.gl_canvas.open_gradient_map()
+
+    def _toggle_pressure_curve(self, curve_type):
+        if curve_type == 'size':
+            editor = self.pressure_size_editor
+            if editor.isVisible():
+                editor.hide()
+            else:
+                editor.show()
+                if self.canvas.current_brush:
+                    editor.set_curve_points(self.canvas.current_brush.pressure_size_curve)
+        else:
+            editor = self.pressure_opacity_editor
+            if editor.isVisible():
+                editor.hide()
+            else:
+                editor.show()
+                if self.canvas.current_brush:
+                    editor.set_curve_points(self.canvas.current_brush.pressure_opacity_curve)
+
+    def _on_pressure_curve_change(self, curve_type):
+        if not self.canvas.current_brush:
+            return
+        if curve_type == 'size':
+            self.canvas.current_brush.pressure_size_curve = self.pressure_size_editor.get_curve_points()
+        else:
+            self.canvas.current_brush.pressure_opacity_curve = self.pressure_opacity_editor.get_curve_points()
 

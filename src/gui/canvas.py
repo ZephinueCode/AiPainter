@@ -4,14 +4,14 @@ import numpy as np
 from PIL import Image
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtWidgets import QWidget, QScrollBar, QGridLayout, QMenu, QApplication, QMessageBox
-from PyQt6.QtCore import Qt, pyqtSignal, QPointF, QRectF, QBuffer, QIODevice
+from PyQt6.QtCore import Qt, pyqtSignal, QPointF, QRectF, QBuffer, QIODevice, QEvent
 from PyQt6.QtGui import QPainter, QColor, QPainterPath, QPen, QImage
 from OpenGL.GL import *
 from src.core.brush_manager import BrushConfig
 from src.core.logic import Node, GroupLayer, PaintLayer, PaintCommand, UndoStack, ProjectLogic, TextLayer
 from src.core.history import CanvasStateCommand
 from src.core.psd_utils import collect_paint_layers_for_export, write_psd
-from src.core.tools import RectSelectTool, LassoTool, BucketTool, PickerTool, SmudgeTool, TextTool, ClipboardUtils, MagicWandTool
+from src.core.tools import RectSelectTool, LassoTool, BucketTool, PickerTool, SmudgeTool, TextTool, ClipboardUtils, MagicWandTool, LiquifyTool
 from src.core.processor import ImageProcessor
 from src.gui.dialogs import GradientMapDialog, AdjustmentDialog
 from src.agent.agent_manager import AIAgentManager
@@ -120,6 +120,7 @@ class GLCanvas(QOpenGLWidget):
         elif tool_name == "Smudge": self.active_tool = SmudgeTool(self)
         elif tool_name == "Text": self.active_tool = TextTool(self)
         elif tool_name == "Magic Wand": self.active_tool = MagicWandTool(self)
+        elif tool_name == "Liquify": self.active_tool = LiquifyTool(self)
         
         if self.active_tool:
             self.active_tool.activate()
@@ -350,6 +351,7 @@ class GLCanvas(QOpenGLWidget):
             "Smudge": SmudgeTool,
             "Text": TextTool,
             "Magic Wand": MagicWandTool,
+            "Liquify": LiquifyTool,
         }
         cls = tool_map.get(tool_name)
         if cls is None:
@@ -472,6 +474,8 @@ class GLCanvas(QOpenGLWidget):
         glEnable(GL_TEXTURE_2D)
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
         self._render_node(self.root)
+        if self.active_tool and hasattr(self.active_tool, "draw_gl"):
+            self.active_tool.draw_gl()
         
         glDisable(GL_TEXTURE_2D)
             
@@ -585,7 +589,7 @@ class GLCanvas(QOpenGLWidget):
                     self._stroke_start_image = self.active_layer.get_image()
                     # Ensure texture is loaded
                     self._update_brush_texture()
-                    self._paint_stroke(pos)
+                    self._paint_stroke(pos, pressure=1.0)
 
     def mouseMoveEvent(self, event):
         if self.is_panning:
@@ -601,7 +605,7 @@ class GLCanvas(QOpenGLWidget):
         if self.active_tool:
             self.active_tool.mouse_move(event, event.position(), pos)
         elif self.last_pos:
-            self._paint_stroke(pos)
+            self._paint_stroke(pos, pressure=1.0)
             self.last_pos = pos
 
     def mouseReleaseEvent(self, event):
@@ -619,6 +623,45 @@ class GLCanvas(QOpenGLWidget):
                 self.undo_stack.push(cmd)
                 self._stroke_start_image = None
             self.last_pos = None
+
+    def tabletEvent(self, event):
+        if self.active_tool:
+            pos = (event.position() - self.offset) / self.zoom
+            if event.type() == QEvent.Type.TabletPress:
+                self.active_tool.mouse_press(event, event.position(), pos)
+            elif event.type() == QEvent.Type.TabletMove:
+                self.active_tool.mouse_move(event, event.position(), pos)
+            elif event.type() == QEvent.Type.TabletRelease:
+                self.active_tool.mouse_release(event, event.position(), pos)
+            event.accept()
+            return
+
+        pos = (event.position() - self.offset) / self.zoom
+        pressure = max(0.0, min(1.0, float(event.pressure())))
+
+        if event.type() == QEvent.Type.TabletPress:
+            if isinstance(self.active_layer, GroupLayer):
+                event.accept()
+                return
+            self.last_pos = pos
+            if self.active_layer and isinstance(self.active_layer, PaintLayer) and self.active_layer.visible and self.current_brush:
+                self.makeCurrent()
+                self._stroke_start_image = self.active_layer.get_image()
+                self._update_brush_texture()
+                self._paint_stroke(pos, pressure=pressure)
+        elif event.type() == QEvent.Type.TabletMove:
+            if self.last_pos:
+                self._paint_stroke(pos, pressure=pressure)
+                self.last_pos = pos
+        elif event.type() == QEvent.Type.TabletRelease:
+            if self._stroke_start_image and self.active_layer:
+                self.makeCurrent()
+                end_image = self.active_layer.get_image()
+                cmd = PaintCommand(self.active_layer, self._stroke_start_image, end_image)
+                self.undo_stack.push(cmd)
+                self._stroke_start_image = None
+            self.last_pos = None
+        event.accept()
 
     def keyPressEvent(self, event):
         ctrl = event.modifiers() & Qt.KeyboardModifier.ControlModifier
@@ -1581,7 +1624,39 @@ class GLCanvas(QOpenGLWidget):
             
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
 
-    def _paint_stroke(self, current_pos):
+    def _interpolate_pressure_curve(self, points, pressure):
+        x_val = max(0.0, min(1.0, float(pressure)))
+        if not points:
+            return x_val
+
+        pairs = []
+        for p in points:
+            if isinstance(p, (list, tuple)) and len(p) >= 2:
+                px = max(0.0, min(255.0, float(p[0])))
+                py = max(0.0, min(255.0, float(p[1])))
+                pairs.append((px, py))
+        if len(pairs) < 2:
+            return x_val
+        pairs.sort(key=lambda t: t[0])
+
+        x255 = x_val * 255.0
+        if x255 <= pairs[0][0]:
+            return pairs[0][1] / 255.0
+        if x255 >= pairs[-1][0]:
+            return pairs[-1][1] / 255.0
+
+        for i in range(len(pairs) - 1):
+            x0, y0 = pairs[i]
+            x1, y1 = pairs[i + 1]
+            if x0 <= x255 <= x1:
+                if abs(x1 - x0) < 1e-6:
+                    return y1 / 255.0
+                t = (x255 - x0) / (x1 - x0)
+                y = y0 * (1.0 - t) + y1 * t
+                return max(0.0, min(1.0, y / 255.0))
+        return x_val
+
+    def _paint_stroke(self, current_pos, pressure=1.0):
         if not self.active_layer or not isinstance(self.active_layer, PaintLayer): return
         if not self.active_layer.visible or not self.current_brush: return
         if not self.last_pos: self.last_pos = current_pos
@@ -1591,17 +1666,23 @@ class GLCanvas(QOpenGLWidget):
         
         glEnable(GL_BLEND)
         glBlendEquation(GL_FUNC_ADD)
+
+        p = max(0.0, min(1.0, float(pressure)))
+        size_factor = self._interpolate_pressure_curve(getattr(self.current_brush, "pressure_size_curve", None), p)
+        opacity_factor = self._interpolate_pressure_curve(getattr(self.current_brush, "pressure_opacity_curve", None), p)
+        current_size = max(1.0, float(self.current_brush.size) * size_factor)
+        current_opacity = max(0.0, min(1.0, float(self.current_brush.opacity) * opacity_factor))
         
         if self.current_brush.blend_mode == "Eraser": 
             glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA)
-            glColor4f(0, 0, 0, self.current_brush.opacity)
+            glColor4f(0, 0, 0, current_opacity)
         else: 
             # Fix: Use Separate Blending for correct alpha accumulation
             # RGB: Standard Source Over (Premultiplied output from glColor)
             # Alpha: Standard accumulation (Src + Dst*(1-Src))
             glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
             
-            alpha = self.current_brush.flow * self.current_brush.opacity
+            alpha = self.current_brush.flow * current_opacity
             
             # === Robust Color Parsing ===
             r, g, b = 0.0, 0.0, 0.0
@@ -1621,13 +1702,13 @@ class GLCanvas(QOpenGLWidget):
             glColor4f(r, g, b, alpha)
 
         dist = np.sqrt((current_pos.x() - self.last_pos.x())**2 + (current_pos.y() - self.last_pos.y())**2)
-        step = max(1.0, self.current_brush.size * self.current_brush.spacing)
+        step = max(1.0, current_size * self.current_brush.spacing)
         steps = int(dist / step) + 1; dx = (current_pos.x() - self.last_pos.x()) / steps; dy = (current_pos.y() - self.last_pos.y()) / steps
         glEnable(GL_TEXTURE_2D); glBindTexture(GL_TEXTURE_2D, self.brush_texture_id)
         
         glBegin(GL_QUADS)
         for i in range(steps):
-            cx = self.last_pos.x() + dx * i; cy = self.last_pos.y() + dy * i; hs = self.current_brush.size / 2
+            cx = self.last_pos.x() + dx * i; cy = self.last_pos.y() + dy * i; hs = current_size / 2
             glTexCoord2f(0,0); glVertex2f(cx-hs, cy-hs); glTexCoord2f(0,1); glVertex2f(cx-hs, cy+hs); glTexCoord2f(1,1); glVertex2f(cx+hs, cy+hs); glTexCoord2f(1,0); glVertex2f(cx+hs, cy-hs)
         glEnd(); glBindFramebuffer(GL_FRAMEBUFFER, 0); self.update()
 

@@ -17,6 +17,10 @@ class BrushConfig:
     spacing: float # 0.0 - 1.0
     hardness: float # 0.0 - 1.0
     blend_mode: str # "Normal", "Eraser"
+    # Pressure curves are stored as control points in 0-255 space:
+    # [(x0, y0), (x1, y1), ...]. None means linear mapping.
+    pressure_size_curve: list = None
+    pressure_opacity_curve: list = None
     texture: Image.Image = field(default=None, repr=False) # Runtime PIL Image
 
 class BrushManager:
@@ -30,7 +34,9 @@ class BrushManager:
         """Loads brushes from folders. Structure: brushes/MyBrush/config.json & texture.png"""
         if not os.path.exists(self.brush_dir):
             os.makedirs(self.brush_dir)
-            self._create_defaults()
+        # Always ensure built-in brushes exist, including new additions.
+        # Existing user brushes are preserved (no overwrite).
+        self._create_defaults()
 
         self.brushes = {}
         
@@ -118,13 +124,21 @@ class BrushManager:
         return img
 
     def _create_defaults(self):
-        """Creates a set of default brushes with Round and Square variations for testing."""
+        """Create/ensure a set of default brushes with Round and Square variants."""
         base_configs = [
             {"name": "2B Pencil", "category": "Pencil", "size": 4, "opacity": 0.9, "flow": 1.0, "spacing": 0.15, "hardness": 0.8, "blend_mode": "Normal"},
+            {"name": "Mechanical Pencil", "category": "Pencil", "size": 2, "opacity": 0.85, "flow": 1.0, "spacing": 0.08, "hardness": 0.95, "blend_mode": "Normal"},
+            {"name": "Charcoal", "category": "Pencil", "size": 12, "opacity": 0.7, "flow": 0.7, "spacing": 0.18, "hardness": 0.35, "blend_mode": "Normal"},
             {"name": "G-Pen", "category": "Ink", "size": 6, "opacity": 1.0, "flow": 1.0, "spacing": 0.05, "hardness": 1.0, "blend_mode": "Normal"},
+            {"name": "Fine Liner", "category": "Ink", "size": 3, "opacity": 1.0, "flow": 1.0, "spacing": 0.04, "hardness": 1.0, "blend_mode": "Normal"},
+            {"name": "Marker", "category": "Ink", "size": 18, "opacity": 0.85, "flow": 0.65, "spacing": 0.08, "hardness": 0.75, "blend_mode": "Normal"},
             {"name": "Thick Oil", "category": "Paint", "size": 50, "opacity": 1.0, "flow": 0.15, "spacing": 0.05, "hardness": 0.6, "blend_mode": "Normal"},
+            {"name": "Watercolor Soft", "category": "Paint", "size": 42, "opacity": 0.55, "flow": 0.35, "spacing": 0.12, "hardness": 0.2, "blend_mode": "Normal"},
+            {"name": "Flat Brush", "category": "Paint", "size": 28, "opacity": 0.9, "flow": 0.6, "spacing": 0.06, "hardness": 0.85, "blend_mode": "Normal"},
             {"name": "Airbrush Soft", "category": "Airbrush", "size": 80, "opacity": 0.5, "flow": 0.4, "spacing": 0.1, "hardness": 0.0, "blend_mode": "Normal"},
+            {"name": "Airbrush Detail", "category": "Airbrush", "size": 22, "opacity": 0.45, "flow": 0.45, "spacing": 0.07, "hardness": 0.2, "blend_mode": "Normal"},
             {"name": "Hard Eraser", "category": "Other", "size": 30, "opacity": 1.0, "flow": 1.0, "spacing": 0.1, "hardness": 1.0, "blend_mode": "Eraser"},
+            {"name": "Soft Eraser", "category": "Other", "size": 45, "opacity": 0.7, "flow": 0.8, "spacing": 0.09, "hardness": 0.2, "blend_mode": "Eraser"},
         ]
         
         shapes = ["Round", "Square"]
@@ -138,13 +152,16 @@ class BrushManager:
                 safe_name = d['name'].replace(" ", "_").lower()
                 folder_path = os.path.join(self.brush_dir, safe_name)
                 os.makedirs(folder_path, exist_ok=True)
+                config_path = os.path.join(folder_path, "config.json")
+                texture_path = os.path.join(folder_path, "texture.png")
                 
-                # Save Config
-                with open(os.path.join(folder_path, "config.json"), 'w') as f:
-                    json.dump(d, f, indent=4)
+                # Save config if missing to avoid overwriting user-edited presets.
+                if not os.path.exists(config_path):
+                    with open(config_path, 'w', encoding='utf-8') as f:
+                        json.dump(d, f, indent=4)
                 
-                # Generate and Save Texture
-                cfg = BrushConfig(**d)
-                # Pass shape to generator (lowercase)
-                tex = self._generate_default_texture(cfg.size, cfg.hardness, shape=shape.lower())
-                tex.save(os.path.join(folder_path, "texture.png"))
+                # Generate default texture only if missing.
+                if not os.path.exists(texture_path):
+                    cfg = BrushConfig(**d)
+                    tex = self._generate_default_texture(cfg.size, cfg.hardness, shape=shape.lower())
+                    tex.save(texture_path)

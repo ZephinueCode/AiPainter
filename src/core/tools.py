@@ -7,7 +7,7 @@ from src.core.logic import PaintLayer, TextLayer, PaintCommand, GroupLayer
 from src.core.processor import ImageProcessor
 from PIL import Image, ImageDraw, ImageFilter  # Added ImageFilter
 import numpy as np
-from OpenGL.GL import glReadPixels, GL_RGB, GL_FLOAT
+from OpenGL.GL import *
 import io
 import os
 import math
@@ -933,6 +933,221 @@ class SmudgeTool(Tool):
         layer_img.paste(src_patch, (dest_x, dest_y), mask)
         self.canvas.active_layer.load_from_image(layer_img)
         self.canvas.update()
+
+
+class LiquifyTool(Tool):
+    MODE_PUSH = 0
+    MODE_BLOAT = 1
+    MODE_PUCKER = 2
+    MODE_RESTORE = 3
+
+    def __init__(self, canvas):
+        super().__init__(canvas)
+        self.cursor = Qt.CursorShape.CrossCursor
+        self.mode = self.MODE_PUSH
+        self.radius = 50.0
+        self.strength = 0.5
+        self.grid_density = 20
+        self.grid_points = None
+        self.orig_grid_points = None
+        self.uv_coords = None
+        self.grid_rows = 0
+        self.grid_cols = 0
+        self.is_active = False
+        self.texture_id = None
+        self.preview_img = None
+        self._target_layer = None
+        self.last_mouse_pos = None
+        self.hover_pos = None
+
+    def activate(self):
+        super().activate()
+        layer = self.canvas.active_layer
+        if not layer or not isinstance(layer, PaintLayer):
+            return
+        self.is_active = True
+        self._target_layer = layer
+        self._init_grid()
+        layer.visible = False
+        self.canvas.update()
+
+    def deactivate(self):
+        if self.is_active:
+            if self._target_layer:
+                self._target_layer.visible = True
+            self.commit()
+        self.is_active = False
+        self.grid_points = None
+        self.canvas.update()
+
+    def commit(self):
+        if not self.is_active or self.grid_points is None or self._target_layer is None:
+            return
+
+        before_state = None
+        use_global_history = hasattr(self.canvas, "begin_history_action") and hasattr(self.canvas, "end_history_action")
+        if use_global_history:
+            before_state = self.canvas.begin_history_action()
+
+        try:
+            self.canvas.makeCurrent()
+            w, h = self.canvas.doc_width, self.canvas.doc_height
+            fbo = glGenFramebuffers(1)
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo)
+            tex = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_2D, tex)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0)
+            glViewport(0, 0, w, h)
+            glClearColor(0, 0, 0, 0)
+            glClear(GL_COLOR_BUFFER_BIT)
+            glMatrixMode(GL_PROJECTION)
+            glLoadIdentity()
+            glOrtho(0, w, h, 0, -1, 1)
+            glMatrixMode(GL_MODELVIEW)
+            glLoadIdentity()
+
+            self._render_mesh_gl()
+            data = glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE)
+            res_img = Image.frombytes("RGBA", (w, h), data).transpose(Image.FLIP_TOP_BOTTOM)
+
+            glDeleteFramebuffers(1, [fbo])
+            glDeleteTextures([tex])
+            glBindFramebuffer(GL_FRAMEBUFFER, 0)
+
+            if use_global_history:
+                self._target_layer.load_from_image(res_img)
+                self.canvas.end_history_action(before_state, "Liquify")
+            else:
+                cmd = PaintCommand(self._target_layer, self.preview_img, res_img)
+                self.canvas.undo_stack.push(cmd)
+                self._target_layer.load_from_image(res_img)
+        except Exception as e:
+            print(f"Liquify Commit Error: {e}")
+
+    def _init_grid(self):
+        img = self._target_layer.get_image()
+        self.preview_img = img.copy()
+
+        w, h = self.canvas.doc_width, self.canvas.doc_height
+        xs = np.arange(0, w + self.grid_density, self.grid_density)
+        ys = np.arange(0, h + self.grid_density, self.grid_density)
+        self.grid_cols = len(xs)
+        self.grid_rows = len(ys)
+        xv, yv = np.meshgrid(xs, ys)
+        self.grid_points = np.stack([xv, yv], axis=-1).astype(np.float32)
+        self.orig_grid_points = self.grid_points.copy()
+        self.uv_coords = np.zeros_like(self.grid_points)
+        self.uv_coords[..., 0] = self.grid_points[..., 0] / w
+        self.uv_coords[..., 1] = self.grid_points[..., 1] / h
+
+        self.canvas.makeCurrent()
+        if self.texture_id:
+            glDeleteTextures([self.texture_id])
+        self.texture_id = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, self.texture_id)
+        if img.mode != "RGBA":
+            img = img.convert("RGBA")
+        data = img.tobytes("raw", "RGBA")
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, img.width, img.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+
+    def mouse_press(self, event, pos, world_pos):
+        if not self.is_active:
+            return
+        self.last_mouse_pos = world_pos
+        self.hover_pos = world_pos
+        self._apply_deformation(world_pos)
+        self.canvas.update()
+
+    def mouse_move(self, event, pos, world_pos):
+        if not self.is_active:
+            return
+        self.hover_pos = world_pos
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._apply_deformation(world_pos)
+            self.last_mouse_pos = world_pos
+        self.canvas.update()
+
+    def mouse_release(self, event, pos, world_pos):
+        self.last_mouse_pos = None
+        self.hover_pos = world_pos
+
+    def _apply_deformation(self, curr_pos):
+        if self.grid_points is None:
+            return
+        center = np.array([curr_pos.x(), curr_pos.y()])
+        radius_sq = self.radius ** 2
+        diff = self.grid_points - center
+        dist_sq = np.sum(diff**2, axis=-1)
+        mask = dist_sq < radius_sq
+        if not np.any(mask):
+            return
+        dist_sq_norm = dist_sq[mask] / radius_sq
+        factor = (1.0 - dist_sq_norm) ** 2 * self.strength
+
+        if self.mode == self.MODE_PUSH:
+            if self.last_mouse_pos is None:
+                return
+            move_vec = np.array([curr_pos.x() - self.last_mouse_pos.x(), curr_pos.y() - self.last_mouse_pos.y()])
+            if np.linalg.norm(move_vec) < 0.1:
+                return
+            self.grid_points[mask] += move_vec[np.newaxis, :] * factor[:, np.newaxis]
+        elif self.mode == self.MODE_BLOAT:
+            self.grid_points[mask] += diff[mask] * (factor[:, np.newaxis] * 0.1)
+        elif self.mode == self.MODE_PUCKER:
+            self.grid_points[mask] -= diff[mask] * (factor[:, np.newaxis] * 0.1)
+        elif self.mode == self.MODE_RESTORE:
+            current = self.grid_points[mask]
+            target = self.orig_grid_points[mask]
+            self.grid_points[mask] += (target - current) * (factor[:, np.newaxis] * 0.5)
+
+    def draw_overlay(self, painter):
+        if not self.is_active or not self.hover_pos:
+            return
+        painter.setPen(QColor(255, 255, 255, 200))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(self.hover_pos, self.radius, self.radius)
+
+    def draw_gl(self):
+        if not self.is_active or self.grid_points is None:
+            return
+        self._render_mesh_gl()
+
+    def _render_mesh_gl(self):
+        if self.texture_id is None:
+            return
+
+        glEnable(GL_TEXTURE_2D)
+        glBindTexture(GL_TEXTURE_2D, self.texture_id)
+        glColor4f(1, 1, 1, 1)
+        rows, cols = self.grid_rows, self.grid_cols
+        verts = self.grid_points.reshape(-1, 2)
+        texs = self.uv_coords.reshape(-1, 2)
+
+        if not hasattr(self, "_gl_indices"):
+            inds = []
+            for i in range(rows - 1):
+                for j in range(cols - 1):
+                    tl = i * cols + j
+                    tr = tl + 1
+                    bl = (i + 1) * cols + j
+                    br = bl + 1
+                    inds.extend([tl, tr, br, bl])
+            self._gl_indices = np.array(inds, dtype=np.uint32)
+
+        glEnableClientState(GL_VERTEX_ARRAY)
+        glEnableClientState(GL_TEXTURE_COORD_ARRAY)
+        glVertexPointer(2, GL_FLOAT, 0, verts.tobytes())
+        glTexCoordPointer(2, GL_FLOAT, 0, texs.tobytes())
+        glDrawElements(GL_QUADS, len(self._gl_indices), GL_UNSIGNED_INT, self._gl_indices.tobytes())
+        glDisableClientState(GL_VERTEX_ARRAY)
+        glDisableClientState(GL_TEXTURE_COORD_ARRAY)
+        glDisable(GL_TEXTURE_2D)
+        glBindTexture(GL_TEXTURE_2D, 0)
 
 # === Adjustment Dialog ===
 class AdjustmentDialog(QDialog):
