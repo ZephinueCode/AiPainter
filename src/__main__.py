@@ -245,7 +245,10 @@ class MainWindow(QMainWindow):
         self.act_undo.triggered.connect(self.on_undo)
 
         self.act_redo = QAction("Redo", self)
-        self.act_redo.setShortcut(QKeySequence.StandardKey.Redo)
+        self.act_redo.setShortcuts([
+            QKeySequence("Ctrl+Shift+Z"),
+            QKeySequence("Ctrl+Y"),
+        ])
         self.act_redo.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         self.act_redo.triggered.connect(self.on_redo)
 

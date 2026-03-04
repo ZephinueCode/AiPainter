@@ -258,14 +258,6 @@ class SettingsDialog(QDialog):
         self.txt_layered_model.setPlaceholderText("e.g. qwen/qwen-image-layered")
         form_models.addRow("Layered (Replicate):", self.txt_layered_model)
 
-        self.txt_sr_general_model_path = QLineEdit(self.agent_manager.superres_general_model_path)
-        self.txt_sr_general_model_path.setPlaceholderText("e.g. models/RealESRGAN_x4plus.pth")
-        form_models.addRow("SR General Model:", self.txt_sr_general_model_path)
-
-        self.txt_sr_illustration_model_path = QLineEdit(self.agent_manager.superres_illustration_model_path)
-        self.txt_sr_illustration_model_path.setPlaceholderText("e.g. models/realesr-animevideov3.pth")
-        form_models.addRow("SR Illustration Model:", self.txt_sr_illustration_model_path)
-        
         self.txt_replicate_key = QLineEdit(self.agent_manager.replicate_api_key)
         self.txt_replicate_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.txt_replicate_key.setPlaceholderText("Replicate API Token (r8_...)")
@@ -281,22 +273,36 @@ class SettingsDialog(QDialog):
         layout_ai.addStretch()
         self.tabs.addTab(self.tab_ai, "AI Settings")
 
-        # --- Tab 4: MobileSAM Model Management ---
+        # --- Tab 4: Local Models ---
         self.tab_sam = QWidget()
         layout_sam = QVBoxLayout(self.tab_sam)
 
-        sam_title = QLabel("MobileSAM Model Management")
+        sam_title = QLabel("Local Models")
         sam_title.setStyleSheet("font-weight: bold; font-size: 13px;")
         layout_sam.addWidget(sam_title)
 
         sam_desc = QLabel(
             "MobileSAM is a lightweight image segmentation model\n"
             "used by the AI Magic Wand tool.\n"
-            "It will be downloaded automatically on first use (~10 MB)."
+            "It will be downloaded automatically on first use (~10 MB).\n\n"
+            "Super-resolution model paths are also configured here."
         )
         sam_desc.setWordWrap(True)
         sam_desc.setStyleSheet("color: #666;")
         layout_sam.addWidget(sam_desc)
+
+        sr_label = QLabel("Super-Resolution Weights")
+        sr_label.setStyleSheet("font-weight: bold; margin-top: 8px;")
+        layout_sam.addWidget(sr_label)
+        form_sr = QFormLayout()
+        self.txt_sr_general_model_path = QLineEdit(self.agent_manager.superres_general_model_path)
+        self.txt_sr_general_model_path.setPlaceholderText("e.g. models/RealESRGAN_x4plus.pth")
+        form_sr.addRow("General Model:", self.txt_sr_general_model_path)
+
+        self.txt_sr_illustration_model_path = QLineEdit(self.agent_manager.superres_illustration_model_path)
+        self.txt_sr_illustration_model_path.setPlaceholderText("e.g. models/realesr-animevideov3.pth")
+        form_sr.addRow("Illustration Model:", self.txt_sr_illustration_model_path)
+        layout_sam.addLayout(form_sr)
 
         # Status info
         form_sam = QFormLayout()
@@ -308,7 +314,7 @@ class SettingsDialog(QDialog):
 
         # Action buttons
         sam_btn_layout = QHBoxLayout()
-        self._sam_download_btn = QPushButton("Download / Load Model")
+        self._sam_download_btn = QPushButton("Download / Load MobileSAM")
         self._sam_download_btn.clicked.connect(self._on_sam_download)
         sam_btn_layout.addWidget(self._sam_download_btn)
 
@@ -326,7 +332,7 @@ class SettingsDialog(QDialog):
         layout_sam.addWidget(self._sam_progress_label)
 
         layout_sam.addStretch()
-        self.tabs.addTab(self.tab_sam, "MobileSAM")
+        self.tabs.addTab(self.tab_sam, "Local Models")
 
         # Refresh SAM status
         self._refresh_sam_status()
