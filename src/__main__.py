@@ -25,7 +25,7 @@ from src.agent.agent_manager import AIAgentManager
 from src.agent.generate import ImageGenerator
 from src.agent.chat_service import ChatRequestThread
 from src.core.logic import PaintLayer # For adding new layer
-from src.core.tools import ClipboardUtils
+from src.core.tools import ClipboardUtils, MagicWandTool
 from PIL import Image
 import io
 
@@ -100,7 +100,12 @@ class MainWindow(QMainWindow):
         self.canvas.gl_canvas.start_auto_sketch()
 
     def on_auto_color(self):
-        self.canvas.gl_canvas.start_auto_color()
+        opts = self.left_sidebar.ai_panel.get_auto_color_options()
+        self.canvas.gl_canvas.start_auto_color(
+            color_pref=opts.get("color", ""),
+            effect_pref=opts.get("effect", ""),
+            material_pref=opts.get("material", ""),
+        )
 
     def on_auto_optimize(self):
         self.canvas.gl_canvas.start_auto_optimize()
@@ -158,12 +163,36 @@ class MainWindow(QMainWindow):
     def on_undo(self):
         if self._forward_text_shortcut("undo"):
             return
+        if self._dispatch_magic_wand_history(redo=False):
+            return
         self.canvas.gl_canvas.perform_undo()
 
     def on_redo(self):
         if self._forward_text_shortcut("redo"):
             return
+        if self._dispatch_magic_wand_history(redo=True):
+            return
         self.canvas.gl_canvas.perform_redo()
+
+    def _dispatch_magic_wand_history(self, redo=False):
+        """When Magic Wand is active, undo/redo should operate on wand points first."""
+        gl = getattr(self.canvas, "gl_canvas", None)
+        if gl is None:
+            return False
+        tool = getattr(gl, "active_tool", None)
+        if not isinstance(tool, MagicWandTool):
+            return False
+        if redo:
+            if hasattr(tool, "redo_last_point"):
+                tool.redo_last_point()
+                gl.update()
+                return True
+            return False
+        if hasattr(tool, "undo_last_point"):
+            tool.undo_last_point()
+            gl.update()
+            return True
+        return False
 
     def _clear_chat_history(self):
         self._chat_history = []

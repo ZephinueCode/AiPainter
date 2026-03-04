@@ -694,7 +694,9 @@ class GLCanvas(QOpenGLWidget):
         event.accept()
 
     def keyPressEvent(self, event):
-        ctrl = event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        mods = event.modifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
 
         # Helper: auto-commit Magic Wand result if it has not been applied yet.
         def _ensure_magic_wand_committed():
@@ -708,14 +710,21 @@ class GLCanvas(QOpenGLWidget):
                     feather=self.active_tool.feather
                 )
 
-        # Magic Wand specific keys (Enter to confirm, Ctrl+Z to undo point).
+        # Magic Wand specific keys (Enter to confirm, Ctrl+Z undo point, Ctrl+Shift+Z/Ctrl+Y redo point).
         if self.active_tool and isinstance(self.active_tool, MagicWandTool):
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 self.active_tool.apply_as_selection(feather=self.active_tool.feather)
                 self.update()
                 return
-            elif ctrl and event.key() == Qt.Key.Key_Z:
-                self.active_tool.undo_last_point()
+            if ctrl and event.key() == Qt.Key.Key_Z:
+                if shift:
+                    self.active_tool.redo_last_point()
+                else:
+                    self.active_tool.undo_last_point()
+                self.update()
+                return
+            if ctrl and event.key() == Qt.Key.Key_Y:
+                self.active_tool.redo_last_point()
                 self.update()
                 return
 
@@ -770,7 +779,7 @@ class GLCanvas(QOpenGLWidget):
 
         # Undo / Redo
         if ctrl and event.key() == Qt.Key.Key_Z:
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            if shift:
                 self.perform_redo()
             else:
                 self.perform_undo()
@@ -976,6 +985,9 @@ class GLCanvas(QOpenGLWidget):
         from src.agent.inpaint_service import WanxInpaintThread
         self._inpaint_old_img = base_img.copy()  # for undo
         self._inpaint_remove_white_bg = remove_bg
+        self._inpaint_apply_mode = "replace"
+        self._inpaint_new_layer_name = ""
+        self._inpaint_target_layer = self.active_layer
         self._inpaint_thread = WanxInpaintThread(base_rgb, mask_rgb, prompt_to_send)
         self._inpaint_thread.progress.connect(self._on_inpaint_progress)
         self._inpaint_thread.finished.connect(self._on_wanx_inpaint_finished)
@@ -1029,11 +1041,74 @@ class GLCanvas(QOpenGLWidget):
             new_layer_name="AI Auto Sketch",
         )
 
-    def start_auto_color(self):
-        """AI shortcut: colorize current line art and output to a new layer."""
+    def _build_auto_color_prompt(self, color_pref="", effect_pref="", material_pref=""):
+        prompt = self._AUTO_COLOR_PROMPT
+        extras = []
+        if color_pref:
+            extras.append(f"Preferred color style: {color_pref}.")
+        if effect_pref:
+            extras.append(f"Preferred rendering effect: {effect_pref}.")
+        if material_pref:
+            extras.append(f"Preferred material/texture: {material_pref}.")
+        if extras:
+            prompt = f"{prompt} User preferences: {' '.join(extras)}"
+        return prompt
+
+    def _has_active_selection(self):
+        if hasattr(self, "selection_feather_mask") and self.selection_feather_mask is not None:
+            try:
+                return bool(np.any(self.selection_feather_mask > 0))
+            except Exception:
+                return True
+        return not self.selection_path.isEmpty()
+
+    def _run_auto_color_inpaint(self, prompt):
+        if not self.active_layer or not isinstance(self.active_layer, PaintLayer):
+            QMessageBox.warning(self, "No Layer", "Please select a Paint Layer.")
+            return
+
+        mask = self._build_inpaint_mask()
+        if mask is None:
+            QMessageBox.warning(self, "No Selection", "Please create a valid selection first.")
+            return
+
+        self.makeCurrent()
+        base_img = self.active_layer.get_image()
+        if base_img.mode == "RGBA":
+            bg = Image.new("RGB", base_img.size, (255, 255, 255))
+            bg.paste(base_img, mask=base_img.split()[3])
+            base_rgb = bg
+        else:
+            base_rgb = base_img.convert("RGB")
+
+        mask_rgb = mask.convert("RGB")
+        from src.agent.inpaint_service import WanxInpaintThread
+        self._inpaint_old_img = base_img.copy()
+        self._inpaint_remove_white_bg = False
+        self._inpaint_apply_mode = "new_layer"
+        self._inpaint_new_layer_name = "AI Auto Color (Local)"
+        self._inpaint_target_layer = self.active_layer
+        self._inpaint_thread = WanxInpaintThread(base_rgb, mask_rgb, prompt.strip() or " ")
+        self._inpaint_thread.progress.connect(self._on_inpaint_progress)
+        self._inpaint_thread.finished.connect(self._on_wanx_inpaint_finished)
+        self._show_inpaint_progress("Auto Color (Local Inpaint)", prompt, base_rgb, mask)
+        self._inpaint_thread.start()
+
+    def start_auto_color(self, color_pref="", effect_pref="", material_pref=""):
+        """AI shortcut: colorize line art.
+
+        If selection exists -> local inpaint auto color.
+        Otherwise -> whole-layer image edit to a new layer.
+        """
+        final_prompt = self._build_auto_color_prompt(color_pref, effect_pref, material_pref)
+
+        if self._has_active_selection():
+            self._run_auto_color_inpaint(final_prompt)
+            return
+
         self._run_qwen_edit(
             title="Auto Color",
-            prompt=self._AUTO_COLOR_PROMPT,
+            prompt=final_prompt,
             remove_bg=True,
             apply_mode="new_layer",
             new_layer_name="AI Auto Color",
@@ -1252,6 +1327,23 @@ class GLCanvas(QOpenGLWidget):
         if result_img is None:
             return
 
+        apply_mode = getattr(self, "_inpaint_apply_mode", "replace")
+        if apply_mode == "new_layer":
+            layer_name = getattr(self, "_inpaint_new_layer_name", "AI Inpaint")
+            ref_layer = getattr(self, "_inpaint_target_layer", self.active_layer)
+            self._insert_ai_result_layer(
+                result_img,
+                layer_name,
+                ref_layer,
+                remove_bg=getattr(self, "_inpaint_remove_white_bg", False),
+            )
+            self._inpaint_old_img = None
+            self._inpaint_remove_white_bg = False
+            self._inpaint_apply_mode = "replace"
+            self._inpaint_new_layer_name = ""
+            self._inpaint_target_layer = None
+            return
+
         self._apply_inpaint_result(result_img)
 
     def _on_qwen_edit_finished(self, result_img, error):
@@ -1292,7 +1384,9 @@ class GLCanvas(QOpenGLWidget):
 
         self.makeCurrent()
 
-        old_img = getattr(self, '_inpaint_old_img', self.active_layer.get_image())
+        old_img = getattr(self, '_inpaint_old_img', None)
+        if old_img is None:
+            old_img = self.active_layer.get_image()
 
         if result_img.mode != "RGBA":
             result_img = result_img.convert("RGBA")
@@ -1314,6 +1408,9 @@ class GLCanvas(QOpenGLWidget):
         self.update()
         self._inpaint_old_img = None
         self._inpaint_remove_white_bg = False
+        self._inpaint_apply_mode = "replace"
+        self._inpaint_new_layer_name = ""
+        self._inpaint_target_layer = None
         self._qwen_apply_mode = "replace"
         self._qwen_new_layer_name = ""
         self._qwen_target_layer = None
@@ -1386,7 +1483,9 @@ class GLCanvas(QOpenGLWidget):
             from src.core.processor import remove_white_background
             result_img = remove_white_background(result_img)
 
-        old_img = getattr(self, '_inpaint_old_img', self.active_layer.get_image())
+        old_img = getattr(self, '_inpaint_old_img', None)
+        if old_img is None:
+            old_img = self.active_layer.get_image()
 
         cmd = PaintCommand(self.active_layer, old_img, result_img)
         self.undo_stack.push(cmd)

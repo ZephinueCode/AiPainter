@@ -206,13 +206,15 @@ class PaintCommand:
         layer = self._resolve_layer()
         if layer:
             img = self.old_img.copy() if hasattr(self.old_img, "copy") else self.old_img
-            layer.load_from_image(img)
+            if img is not None:
+                layer.load_from_image(img)
 
     def redo(self):
         layer = self._resolve_layer()
         if layer:
             img = self.new_img.copy() if hasattr(self.new_img, "copy") else self.new_img
-            layer.load_from_image(img)
+            if img is not None:
+                layer.load_from_image(img)
 
 class UndoStack:
     def __init__(self, limit=30, owner_canvas=None):

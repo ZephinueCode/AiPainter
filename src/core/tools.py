@@ -1253,6 +1253,8 @@ class MagicWandTool(Tool):
         # Point data – stored in layer pixel coordinates
         self._points = []       # [[x, y], ...]
         self._labels = []       # [1, 0, ...]  1=positive 0=negative
+        self._redo_points = []  # redo stack for points
+        self._redo_labels = []  # redo stack for labels
         self._point_mode = 1    # Current default mode: 1=positive
 
         # Feather radius (set by the panel's slider)
@@ -1335,6 +1337,9 @@ class MagicWandTool(Tool):
 
         self._points.append([lx, ly])
         self._labels.append(label)
+        # New point invalidates redo stack.
+        self._redo_points.clear()
+        self._redo_labels.clear()
 
         # Ensure temp image exists
         self._ensure_temp_image(layer)
@@ -1437,14 +1442,27 @@ class MagicWandTool(Tool):
         """Undo the last point."""
         if not self._points:
             return
-        self._points.pop()
-        self._labels.pop()
+        p = self._points.pop()
+        l = self._labels.pop()
+        self._redo_points.append(p)
+        self._redo_labels.append(l)
         self._notify_panel()
         if self._points:
             self._run_inference()
         else:
             self._current_mask = None
             self.canvas.update()
+
+    def redo_last_point(self):
+        """Redo the last undone point."""
+        if not self._redo_points:
+            return
+        p = self._redo_points.pop()
+        l = self._redo_labels.pop()
+        self._points.append(p)
+        self._labels.append(l)
+        self._notify_panel()
+        self._run_inference()
 
     def clear_all_points(self):
         """Clear all points."""
@@ -1529,6 +1547,8 @@ class MagicWandTool(Tool):
     def _clear_all(self):
         self._points.clear()
         self._labels.clear()
+        self._redo_points.clear()
+        self._redo_labels.clear()
         self._current_mask = None
         self._cleanup_temp()
         self._notify_panel()

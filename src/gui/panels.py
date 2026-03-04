@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QTreeWidget, QTreeWidgetItem, QListWidget, QListWidgetItem, 
                              QGroupBox, QLabel, QSlider, QInputDialog, QFrame, QGridLayout,
                              QAbstractItemView, QMenu, QMessageBox, QSplitter, QScrollArea,
-                             QComboBox)
+                             QComboBox, QLineEdit, QFormLayout)
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap, QImage
 from src.gui.widgets import ColorPickerWidget, PressureCurveEditor
@@ -135,7 +135,7 @@ class ToolsPanel(QWidget):
         wand_layout.setSpacing(4)
 
         # Description
-        desc = QLabel("Left-click to add positive points,\nright-click for negative.\nEnter to apply / Esc to cancel")
+        desc = QLabel("Left-click to add positive points,\nright-click for negative.\nCtrl+Z undo / Ctrl+Shift+Z redo")
         desc.setStyleSheet("color: #888; font-size: 10px;")
         desc.setWordWrap(True)
         wand_layout.addWidget(desc)
@@ -171,6 +171,9 @@ class ToolsPanel(QWidget):
         self._wand_undo_btn = QPushButton("Undo")
         self._wand_undo_btn.clicked.connect(self._on_wand_undo)
         btn_row1.addWidget(self._wand_undo_btn)
+        self._wand_redo_btn = QPushButton("Redo")
+        self._wand_redo_btn.clicked.connect(self._on_wand_redo)
+        btn_row1.addWidget(self._wand_redo_btn)
         self._wand_clear_btn = QPushButton("Clear")
         self._wand_clear_btn.clicked.connect(self._on_wand_clear)
         btn_row1.addWidget(self._wand_clear_btn)
@@ -338,6 +341,11 @@ class ToolsPanel(QWidget):
             self._magic_wand_tool.undo_last_point()
             self._refresh_wand_info()
 
+    def _on_wand_redo(self):
+        if self._magic_wand_tool and hasattr(self._magic_wand_tool, "redo_last_point"):
+            self._magic_wand_tool.redo_last_point()
+            self._refresh_wand_info()
+
     def _on_wand_clear(self):
         if self._magic_wand_tool:
             self._magic_wand_tool.clear_all_points()
@@ -450,11 +458,38 @@ class AIPanel(QWidget):
         ai_grid.addWidget(self.btn_auto_optimize, 1, 1)
         ai_grid.addWidget(self.btn_auto_resolution, 2, 0, 1, 2)
         layout.addLayout(ai_grid)
+
+        # Auto Color inline options (left panel, editable text fields)
+        self.auto_color_opts = QGroupBox("Auto Color Options")
+        opt_layout = QFormLayout(self.auto_color_opts)
+        opt_layout.setContentsMargins(8, 8, 8, 8)
+        opt_layout.setSpacing(4)
+
+        self.txt_auto_color_color = QLineEdit()
+        self.txt_auto_color_color.setPlaceholderText("e.g. warm pastel, neon cyberpunk")
+        opt_layout.addRow("Color:", self.txt_auto_color_color)
+
+        self.txt_auto_color_effect = QLineEdit()
+        self.txt_auto_color_effect.setPlaceholderText("e.g. cel shading, soft render")
+        opt_layout.addRow("Effect:", self.txt_auto_color_effect)
+
+        self.txt_auto_color_material = QLineEdit()
+        self.txt_auto_color_material.setPlaceholderText("e.g. matte, metallic, rough texture")
+        opt_layout.addRow("Material:", self.txt_auto_color_material)
+
+        layout.addWidget(self.auto_color_opts)
         layout.addStretch()
 
     def open_generator(self):
         dlg = AIGenerateDialog(self)
         dlg.exec()
+
+    def get_auto_color_options(self):
+        return {
+            "color": self.txt_auto_color_color.text().strip(),
+            "effect": self.txt_auto_color_effect.text().strip(),
+            "material": self.txt_auto_color_material.text().strip(),
+        }
 
 class LeftSidebar(QWidget):
     def __init__(self, brush_manager, on_brush_selected, on_tool_selected, canvas=None):
