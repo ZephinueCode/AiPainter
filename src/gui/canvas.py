@@ -830,12 +830,16 @@ class GLCanvas(QOpenGLWidget):
     
     def test_trigger_ai(self):
         """Debug entry for layered AI generation from the active layer."""
+        # Prevent duplicate triggers while a generation is already running.
+        if getattr(self, '_layered_progress', None) is not None:
+            return
+
         if not self.active_layer or not isinstance(self.active_layer, PaintLayer):
             QMessageBox.warning(self, "AI Tip", "Select a layer first.")
             return
 
         # 1) Ask user for prompt (empty prompt allows auto partition behavior).
-        from PyQt6.QtWidgets import QInputDialog
+        from PyQt6.QtWidgets import QInputDialog, QProgressDialog
         text, ok = QInputDialog.getText(self, "Qwen Layered AI", "Input prompt (or leave blank to partition)......")
         if not ok: return
 
@@ -843,13 +847,23 @@ class GLCanvas(QOpenGLWidget):
         self.makeCurrent() # Ensure valid GL context before reading texture-backed layer.
         input_pil = self.active_layer.to_pil()
 
-        # 3) Start layered generation thread.
+        # 3) Show a progress dialog so the user knows work is happening.
+        progress = QProgressDialog("AI is generating layers, please wait...", None, 0, 0, self)
+        progress.setWindowTitle("AI Multi-Layer Generation")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)   # Show immediately
+        progress.setCancelButton(None)   # Non-cancellable (API call cannot be aborted)
+        progress.setMinimumWidth(320)
+        progress.show()
+        self._layered_progress = progress
+
+        # 4) Start layered generation thread.
         from src.agent.generate import ImageGenerator
         self.current_generator = ImageGenerator()
         # Results are handled in handle_layered_generation.
         self.current_generator.layered_generation_finished.connect(self.handle_layered_generation)
 
-        # 4) Trigger generation.
+        # 5) Trigger generation.
         print("AI Parsing...")
         self.current_generator.generate_layered(prompt=text, input_image=input_pil, num_layers=4)
 
@@ -857,6 +871,11 @@ class GLCanvas(QOpenGLWidget):
         """
         Insert generated layers into the project and refresh the UI state. Keep GL context valid.
         """
+        # Close progress dialog.
+        if getattr(self, '_layered_progress', None) is not None:
+            self._layered_progress.close()
+            self._layered_progress = None
+
         if error_msg:
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Generation Failed", error_msg)
