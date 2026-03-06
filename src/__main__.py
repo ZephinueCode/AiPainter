@@ -154,11 +154,11 @@ class MainWindow(QMainWindow):
 
     def on_paste(self):
         if self._layer_panel_has_focus():
-            self.layer_panel.paste_node()
-        elif self._forward_text_shortcut("paste"):
+            if self.layer_panel.paste_node():
+                return
+        if self._forward_text_shortcut("paste"):
             return
-        else:
-            ClipboardUtils.paste(self.canvas.gl_canvas)
+        ClipboardUtils.paste(self.canvas.gl_canvas)
 
     def on_undo(self):
         if self._forward_text_shortcut("undo"):

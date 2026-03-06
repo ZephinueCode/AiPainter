@@ -129,11 +129,10 @@ class ClipboardUtils:
         canvas.selection_path = QPainterPath()
         canvas.selection_feather_mask = None
 
-        # If there are floating items, discard them without committing
-        # (the content was already captured above)
+        # If there are floating items, commit the transform so the moved
+        # content stays at its new position on the layer, then clear.
         if floating:
-            for item in tool.floating_items:
-                item['layer'].load_from_image(item['snapshot'])
+            tool.commit_transform(record_history=False)
             tool.floating_items = []
 
         # Also put on system clipboard for cross-app paste
@@ -166,10 +165,40 @@ class ClipboardUtils:
         floating = (tool and hasattr(tool, 'floating_items') and tool.floating_items)
 
         if floating:
-            # Floating overlay exists — copy its content then discard it.
-            # copy() already discards floating items and restores snapshots.
-            ClipboardUtils.copy(canvas, record_history=False)
+            # Floating overlay exists — capture its content for clipboard,
+            # then discard it.  The layer already had the selected pixels
+            # removed by _lift_selection, so we just drop the floating
+            # items (no commit, no snapshot restore) to complete the cut.
+            item = tool.floating_items[0]
+            qimg = item['qimg']
+            buf = QBuffer()
+            buf.open(QIODevice.OpenModeFlag.ReadWrite)
+            qimg.save(buf, "PNG")
+            res = Image.open(io.BytesIO(bytes(buf.data()))).convert("RGBA")
+            offset = (int(tool.tf_pos.x()), int(tool.tf_pos.y()))
+
+            canvas._clip_image = res
+            canvas._clip_offset = offset
+            canvas._clip_path = QPainterPath(canvas.selection_path)
+            canvas._clip_feather = (
+                canvas.selection_feather_mask.copy()
+                if getattr(canvas, 'selection_feather_mask', None) is not None
+                else None
+            )
             canvas._clip_was_cut = True
+
+            # Put on system clipboard
+            try:
+                bio = io.BytesIO()
+                res.save(bio, "PNG")
+                QApplication.clipboard().setImage(QImage.fromData(bio.getvalue()))
+            except:
+                pass
+
+            canvas.selection_path = QPainterPath()
+            canvas.selection_feather_mask = None
+            tool.floating_items = []
+
             canvas.update()
             if record_history:
                 canvas.end_history_action(before_state, "Cut")

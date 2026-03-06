@@ -666,6 +666,14 @@ class LayerPanel(QWidget):
             self._del_node()
             event.accept()
             return True
+        # Forward common canvas shortcuts (copy/cut/paste/undo/redo) so they
+        # work even when the layer tree has focus.
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            if event.key() in (Qt.Key.Key_C, Qt.Key.Key_X, Qt.Key.Key_V,
+                               Qt.Key.Key_Z, Qt.Key.Key_Y):
+                self._gl().keyPressEvent(event)
+                return True
         return False
 
     def _snapshot_node(self, node):
