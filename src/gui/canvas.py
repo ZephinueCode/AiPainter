@@ -27,19 +27,6 @@ class GLCanvas(QOpenGLWidget):
     layer_structure_changed = pyqtSignal()
     view_changed = pyqtSignal()
     brush_color_changed = pyqtSignal(list)
-    _AUTO_SKETCH_PROMPT = (
-        "Detect rough or unfinished line art in the current layer and refine it into clean, "
-        "high-quality line art. Preserve original composition and character identity, fix broken "
-        "strokes, improve contour consistency, and avoid adding unrelated objects."
-    )
-    _AUTO_COLOR_PROMPT = (
-        "Analyze the current line art and generate a high-quality colored version while preserving "
-        "the existing structure. Apply harmonious palette, clean rendering, and readable shading."
-    )
-    _AUTO_OPTIMIZE_PROMPT = (
-        "Auto-optimize this drawing while preserving intent. Improve structure correctness, "
-        "proportions, silhouette readability, composition balance, and overall visual quality."
-    )
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1053,16 +1040,18 @@ class GLCanvas(QOpenGLWidget):
 
     def start_auto_sketch(self):
         """AI shortcut: refine unfinished line art and output to a new layer."""
+        mgr = AIAgentManager()
         self._run_qwen_edit(
             title="Auto Sketch",
-            prompt=self._AUTO_SKETCH_PROMPT,
-            remove_bg=True,
+            prompt=mgr.auto_sketch_prompt,
+            remove_bg=mgr.auto_remove_white_bg,
             apply_mode="new_layer",
             new_layer_name="AI Auto Sketch",
         )
 
     def _build_auto_color_prompt(self, color_pref="", effect_pref="", material_pref=""):
-        prompt = self._AUTO_COLOR_PROMPT
+        mgr = AIAgentManager()
+        prompt = mgr.auto_color_prompt
         extras = []
         if color_pref:
             extras.append(f"Preferred color style: {color_pref}.")
@@ -1129,17 +1118,18 @@ class GLCanvas(QOpenGLWidget):
         self._run_qwen_edit(
             title="Auto Color",
             prompt=final_prompt,
-            remove_bg=True,
+            remove_bg=AIAgentManager().auto_remove_white_bg,
             apply_mode="new_layer",
             new_layer_name="AI Auto Color",
         )
 
     def start_auto_optimize(self):
         """AI shortcut: optimize structure and aesthetics to a new layer."""
+        mgr = AIAgentManager()
         self._run_qwen_edit(
             title="Auto Optimize",
-            prompt=self._AUTO_OPTIMIZE_PROMPT,
-            remove_bg=True,
+            prompt=mgr.auto_optimize_prompt,
+            remove_bg=mgr.auto_remove_white_bg,
             apply_mode="new_layer",
             new_layer_name="AI Auto Optimize",
         )

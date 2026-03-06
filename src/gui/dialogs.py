@@ -3,11 +3,15 @@
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QSpinBox, 
                              QDialogButtonBox, QTabWidget, QWidget, QDoubleSpinBox, 
                              QLabel, QGridLayout, QToolButton, QPushButton, QButtonGroup, 
-                             QLineEdit, QMessageBox, QTextEdit, QHBoxLayout, QApplication, QSlider)
-from PyQt6.QtCore import Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QPixmap, QImage
+                             QLineEdit, QMessageBox, QTextEdit, QHBoxLayout, QApplication,
+                             QSlider, QCheckBox, QRadioButton, QScrollArea, QFrame,
+                             QSizePolicy)
+from PyQt6.QtCore import Qt, QSize, pyqtSignal, QPoint, QRect, QRectF
+from PyQt6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QCursor, QPainterPath
 import json
 import os
+import numpy as np
+from PIL import Image
 from src.agent.agent_manager import AIAgentManager
 from src.gui.widgets import GradientSlider, ColorPickerWidget
 from src.core.processor import ImageProcessor
@@ -163,7 +167,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None, current_width=1920, current_height=1080, current_scale=1.5):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(500, 450) 
+        self.resize(520, 520) 
         
         self.agent_manager = AIAgentManager()
         
@@ -288,7 +292,57 @@ class SettingsDialog(QDialog):
         layout_ai.addStretch()
         self.tabs.addTab(self.tab_ai, "AI Settings")
 
-        # --- Tab 4: Local Models ---
+        # --- Tab 4: AI Prompts ---
+        self.tab_prompts = QWidget()
+        layout_prompts = QVBoxLayout(self.tab_prompts)
+
+        prompts_title = QLabel("AI Preset Prompts")
+        prompts_title.setStyleSheet("font-weight: bold; font-size: 13px;")
+        layout_prompts.addWidget(prompts_title)
+
+        prompts_desc = QLabel("Customize the preset prompts used by Auto Sketch, Auto Color,\nand Auto Optimize. Leave empty to use defaults.")
+        prompts_desc.setWordWrap(True)
+        prompts_desc.setStyleSheet("color: #888; font-size: 10px;")
+        layout_prompts.addWidget(prompts_desc)
+
+        layout_prompts.addWidget(QLabel("Auto Sketch Prompt:"))
+        self.txt_auto_sketch_prompt = QTextEdit()
+        self.txt_auto_sketch_prompt.setPlaceholderText("Prompt for Auto Sketch...")
+        self.txt_auto_sketch_prompt.setMaximumHeight(80)
+        self.txt_auto_sketch_prompt.setPlainText(self.agent_manager.auto_sketch_prompt)
+        layout_prompts.addWidget(self.txt_auto_sketch_prompt)
+
+        layout_prompts.addWidget(QLabel("Auto Color Prompt:"))
+        self.txt_auto_color_prompt = QTextEdit()
+        self.txt_auto_color_prompt.setPlaceholderText("Prompt for Auto Color...")
+        self.txt_auto_color_prompt.setMaximumHeight(80)
+        self.txt_auto_color_prompt.setPlainText(self.agent_manager.auto_color_prompt)
+        layout_prompts.addWidget(self.txt_auto_color_prompt)
+
+        layout_prompts.addWidget(QLabel("Auto Optimize Prompt:"))
+        self.txt_auto_optimize_prompt = QTextEdit()
+        self.txt_auto_optimize_prompt.setPlaceholderText("Prompt for Auto Optimize...")
+        self.txt_auto_optimize_prompt.setMaximumHeight(80)
+        self.txt_auto_optimize_prompt.setPlainText(self.agent_manager.auto_optimize_prompt)
+        layout_prompts.addWidget(self.txt_auto_optimize_prompt)
+
+        self.cb_auto_remove_white_bg = QCheckBox("Auto Remove White Background on result")
+        self.cb_auto_remove_white_bg.setChecked(self.agent_manager.auto_remove_white_bg)
+        self.cb_auto_remove_white_bg.setToolTip(
+            "When enabled, Auto Sketch / Color / Optimize will automatically\n"
+            "remove the white background from the AI result."
+        )
+        layout_prompts.addWidget(self.cb_auto_remove_white_bg)
+
+        btn_reset_prompts = QPushButton("Reset Prompts to Defaults")
+        btn_reset_prompts.setStyleSheet("color: #888;")
+        btn_reset_prompts.clicked.connect(self._reset_prompt_defaults)
+        layout_prompts.addWidget(btn_reset_prompts)
+
+        layout_prompts.addStretch()
+        self.tabs.addTab(self.tab_prompts, "AI Prompts")
+
+        # --- Tab 5: Local Models ---
         self.tab_sam = QWidget()
         layout_sam = QVBoxLayout(self.tab_sam)
 
@@ -385,6 +439,10 @@ class SettingsDialog(QDialog):
             replicate_api_key=self.txt_replicate_key.text(),
             superres_general_model_path=self.txt_sr_general_model_path.text(),
             superres_illustration_model_path=self.txt_sr_illustration_model_path.text(),
+            auto_sketch_prompt=self.txt_auto_sketch_prompt.toPlainText(),
+            auto_color_prompt=self.txt_auto_color_prompt.toPlainText(),
+            auto_optimize_prompt=self.txt_auto_optimize_prompt.toPlainText(),
+            auto_remove_white_bg=self.cb_auto_remove_white_bg.isChecked(),
         )
         super().accept()
 
@@ -478,6 +536,13 @@ class SettingsDialog(QDialog):
         self.txt_chat_system_prompt.setPlainText(_DEFAULT_MODELS["chat_system_prompt"])
         self.txt_sr_general_model_path.setText(_DEFAULT_MODELS["superres_general_model_path"])
         self.txt_sr_illustration_model_path.setText(_DEFAULT_MODELS["superres_illustration_model_path"])
+
+    def _reset_prompt_defaults(self):
+        from src.agent.agent_manager import _DEFAULT_PROMPTS
+        self.txt_auto_sketch_prompt.setPlainText(_DEFAULT_PROMPTS["auto_sketch_prompt"])
+        self.txt_auto_color_prompt.setPlainText(_DEFAULT_PROMPTS["auto_color_prompt"])
+        self.txt_auto_optimize_prompt.setPlainText(_DEFAULT_PROMPTS["auto_optimize_prompt"])
+        self.cb_auto_remove_white_bg.setChecked(_DEFAULT_PROMPTS["auto_remove_white_bg"])
 
     def get_values(self):
         return {
@@ -574,10 +639,12 @@ class AIGenerateDialog(QDialog):
     # Signals to Main Window
     generationRequested = pyqtSignal(str, str, str) # prompt, neg, size_str
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, canvas_width=1920, canvas_height=1080):
         super().__init__(parent)
         self.setWindowTitle("AI Image Generator")
         self.resize(400, 300) 
+        self._canvas_w = canvas_width
+        self._canvas_h = canvas_height
         
         layout = QVBoxLayout(self)
         
@@ -605,6 +672,12 @@ class AIGenerateDialog(QDialog):
         self.cycler_h = SizeCyclerWidget("H:")
         size_layout.addWidget(self.cycler_w)
         size_layout.addWidget(self.cycler_h)
+
+        self.btn_fit_canvas = QPushButton("Fit to Canvas")
+        self.btn_fit_canvas.setToolTip(f"Set size to current canvas dimensions ({canvas_width}×{canvas_height})")
+        self.btn_fit_canvas.clicked.connect(self._on_fit_canvas)
+        size_layout.addWidget(self.btn_fit_canvas)
+
         layout.addLayout(size_layout)
         
         layout.addStretch()
@@ -621,6 +694,10 @@ class AIGenerateDialog(QDialog):
         btn_layout.addWidget(self.btn_generate)
         btn_layout.addWidget(self.btn_cancel)
         layout.addLayout(btn_layout)
+
+    def _on_fit_canvas(self):
+        self.cycler_w.spin_val.setValue(self._canvas_w)
+        self.cycler_h.spin_val.setValue(self._canvas_h)
 
     def on_start(self):
         prompt = self.txt_prompt.toPlainText().strip()
@@ -639,3 +716,508 @@ class AIGenerateDialog(QDialog):
         
         # Close dialog immediately
         self.accept()
+
+
+# === Chroma Key Preview Canvas ===
+class _ChromaKeyCanvas(QWidget):
+    """Internal preview widget for the Chroma Key dialog.
+
+    Supports:
+    - Pan (middle-click / Ctrl+drag) and zoom (scroll wheel)
+    - Eyedropper mode: click to pick the key color
+    - Safety-brush mode: paint green overlay to mark protected areas
+    """
+
+    colorPicked = pyqtSignal(int, int, int)  # r, g, b (0-255)
+    safetyMaskChanged = pyqtSignal(bool)    # True = has painted area
+
+    MODE_EYEDROPPER = 0
+    MODE_SAFETY = 1
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(300, 250)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+        self._src_img: Image.Image | None = None   # original RGBA
+        self._result_img: Image.Image | None = None # after chroma key
+        self._safety_mask: np.ndarray | None = None # H×W uint8, 255=protected
+        self._show_result = True
+
+        self._zoom = 1.0
+        self._offset = QPoint(0, 0)
+        self._pan_start = None
+
+        self.mode = self.MODE_EYEDROPPER
+        self.brush_size = 20
+        self._painting = False
+        self._last_safety_pt = None          # for interpolation
+        self._safety_overlay_dirty = True    # rebuild overlay pixmap
+        self._safety_overlay_pm = None       # cached QPixmap
+        self._safety_overlay_buf = None      # bytes buffer kept alive for QImage
+
+        # Checkerboard tile for transparency preview
+        self._checker = self._make_checker(16)
+
+    # ── public API ──────────────────────────────────
+    def set_images(self, src: Image.Image, result: Image.Image | None):
+        self._src_img = src.copy()
+        if self._safety_mask is None or self._safety_mask.shape != (src.height, src.width):
+            self._safety_mask = np.zeros((src.height, src.width), dtype=np.uint8)
+        self._result_img = result
+        self._fit_view()
+        self.update()
+
+    def set_result(self, result: Image.Image | None):
+        self._result_img = result
+        self.update()
+
+    def get_safety_mask(self) -> np.ndarray | None:
+        return self._safety_mask
+
+    def set_show_result(self, show: bool):
+        self._show_result = show
+        self.update()
+
+    def clear_safety_mask(self):
+        if self._safety_mask is not None:
+            self._safety_mask[:] = 0
+            self._safety_overlay_dirty = True
+            self._safety_overlay_pm = None
+            self._safety_overlay_buf = None
+            self.safetyMaskChanged.emit(False)
+            self.update()
+
+    # ── internal helpers ────────────────────────────
+    @staticmethod
+    def _make_checker(tile_size):
+        """Build a small checkerboard QPixmap for transparency bg."""
+        pm = QPixmap(tile_size * 2, tile_size * 2)
+        pm.fill(QColor(204, 204, 204))
+        p = QPainter(pm)
+        p.fillRect(0, 0, tile_size, tile_size, QColor(255, 255, 255))
+        p.fillRect(tile_size, tile_size, tile_size, tile_size, QColor(255, 255, 255))
+        p.end()
+        return pm
+
+    def _fit_view(self):
+        if self._src_img is None:
+            return
+        iw, ih = self._src_img.size
+        vw, vh = self.width(), self.height()
+        if iw == 0 or ih == 0:
+            return
+        scale = min(vw / iw, vh / ih) * 0.95
+        self._zoom = scale
+        self._offset = QPoint(
+            int((vw - iw * scale) / 2),
+            int((vh - ih * scale) / 2),
+        )
+
+    def _widget_to_img(self, pos) -> QPoint | None:
+        """Convert widget coordinates → image pixel coordinates."""
+        if self._src_img is None:
+            return None
+        ix = (pos.x() - self._offset.x()) / self._zoom
+        iy = (pos.y() - self._offset.y()) / self._zoom
+        iw, ih = self._src_img.size
+        if 0 <= ix < iw and 0 <= iy < ih:
+            return QPoint(int(ix), int(iy))
+        return None
+
+    @staticmethod
+    def _pil_to_qpixmap(pil_img: Image.Image) -> QPixmap:
+        if pil_img.mode != "RGBA":
+            pil_img = pil_img.convert("RGBA")
+        data = pil_img.tobytes("raw", "RGBA")
+        qimg = QImage(data, pil_img.width, pil_img.height,
+                       pil_img.width * 4, QImage.Format.Format_RGBA8888)
+        # .copy() MUST be called while `data` is still alive to
+        # produce a QImage that owns its own pixel buffer.
+        return QPixmap.fromImage(qimg.copy())
+
+    # ── painting events ─────────────────────────────
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        # Background
+        p.fillRect(self.rect(), QColor(60, 60, 60))
+
+        img = self._result_img if (self._show_result and self._result_img) else self._src_img
+        if img is None:
+            p.end()
+            return
+
+        iw, ih = img.size
+        dest = QRectF(self._offset.x(), self._offset.y(), iw * self._zoom, ih * self._zoom)
+
+        # Checkerboard behind the image (shows transparency)
+        p.save()
+        p.setClipRect(dest)
+        p.drawTiledPixmap(dest.toAlignedRect(), self._checker)
+        p.restore()
+
+        # Draw the image itself
+        pm = self._pil_to_qpixmap(img)
+        p.drawPixmap(dest.toAlignedRect(), pm)
+
+        # Draw safety mask overlay (semi-transparent green) — cached
+        if self._safety_mask is not None and np.any(self._safety_mask):
+            if self._safety_overlay_dirty or self._safety_overlay_pm is None:
+                h, w = self._safety_mask.shape
+                green = np.zeros((h, w, 4), dtype=np.uint8)
+                green[self._safety_mask > 0] = [0, 200, 80, 100]
+                # QImage owns its own copy of the pixel data
+                qimg = QImage(green.data, w, h, w * 4,
+                              QImage.Format.Format_RGBA8888).copy()
+                self._safety_overlay_pm = QPixmap.fromImage(qimg)
+                self._safety_overlay_dirty = False
+            p.drawPixmap(dest.toAlignedRect(), self._safety_overlay_pm)
+
+        # Draw brush cursor in safety mode
+        if self.mode == self.MODE_SAFETY and self.underMouse():
+            cursor_pos = self.mapFromGlobal(QCursor.pos())
+            radius = self.brush_size * self._zoom / 2
+            p.setPen(QPen(QColor(0, 255, 100, 180), 1.5))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(cursor_pos, int(radius), int(radius))
+
+        p.end()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton or (
+            event.button() == Qt.MouseButton.LeftButton
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            self._pan_start = event.pos() - self._offset
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            if self.mode == self.MODE_EYEDROPPER:
+                self._pick_color(event.pos())
+            elif self.mode == self.MODE_SAFETY:
+                self._painting = True
+                self._last_safety_pt = None
+                self._paint_safety(event.pos())
+
+    def mouseMoveEvent(self, event):
+        if self._pan_start is not None:
+            self._offset = event.pos() - self._pan_start
+            self.update()
+            return
+        if self._painting and self.mode == self.MODE_SAFETY:
+            self._paint_safety(event.pos())
+        if self.mode == self.MODE_SAFETY:
+            self.update()  # repaint cursor
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton or (
+            event.button() == Qt.MouseButton.LeftButton and self._pan_start is not None
+        ):
+            self._pan_start = None
+            self._update_cursor()
+            return
+        was_painting = self._painting
+        self._painting = False
+        self._last_safety_pt = None
+        if was_painting and self.mode == self.MODE_SAFETY:
+            # Emit once more so the dialog runs _update_preview now that painting stopped
+            has = self._safety_mask is not None and bool(np.any(self._safety_mask))
+            self.safetyMaskChanged.emit(has)
+
+    def wheelEvent(self, event):
+        factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+        mouse = event.position()
+        old_img_x = (mouse.x() - self._offset.x()) / self._zoom
+        old_img_y = (mouse.y() - self._offset.y()) / self._zoom
+        self._zoom = max(0.05, min(self._zoom * factor, 30.0))
+        self._offset = QPoint(
+            int(mouse.x() - old_img_x * self._zoom),
+            int(mouse.y() - old_img_y * self._zoom),
+        )
+        self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._src_img:
+            self._fit_view()
+
+    # ── tool actions ────────────────────────────────
+    def _pick_color(self, widget_pos):
+        pt = self._widget_to_img(widget_pos)
+        if pt is None or self._src_img is None:
+            return
+        r, g, b = self._src_img.getpixel((pt.x(), pt.y()))[:3]
+        self.colorPicked.emit(r, g, b)
+
+    def _paint_safety(self, widget_pos):
+        pt = self._widget_to_img(widget_pos)
+        if pt is None or self._safety_mask is None:
+            return
+        import cv2
+        radius = max(1, int(self.brush_size / 2))
+        cur = (pt.x(), pt.y())
+        if self._last_safety_pt is not None:
+            cv2.line(self._safety_mask, self._last_safety_pt, cur, 255, radius * 2)
+        cv2.circle(self._safety_mask, cur, radius, 255, -1)
+        self._last_safety_pt = cur
+        self._safety_overlay_dirty = True
+        self.safetyMaskChanged.emit(True)
+        self.update()
+
+    def _update_cursor(self):
+        if self.mode == self.MODE_EYEDROPPER:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def set_mode(self, mode):
+        self.mode = mode
+        self._update_cursor()
+
+
+# === Chroma Key Dialog ===
+class ChromaKeyDialog(QDialog):
+    """Chroma Key (Color Key) dialog for removing a specific color from a layer.
+
+    Features:
+    - Eyedropper to pick the key color from the image
+    - Tolerance slider to control how close a color must be to be removed
+    - Edge softness slider for smooth transitions at the boundary
+    - Safety-zone brush: paint areas that should never be removed
+    - Real-time before/after preview with checkerboard transparency background
+    """
+
+    def __init__(self, parent, layer_image: Image.Image):
+        """
+        Parameters
+        ----------
+        parent : QWidget
+        layer_image : PIL.Image.Image (RGBA)
+            The current image of the layer to process.
+        """
+        super().__init__(parent)
+        self.setWindowTitle("Chroma Key")
+        self.resize(750, 600)
+
+        self._src_img = layer_image.convert("RGBA")
+        self._result_img = None
+
+        # Key color (default: white)
+        self._key_r, self._key_g, self._key_b = 255, 255, 255
+        self._tolerance = 30
+        self._softness = 5
+
+        self._build_ui()
+        self._canvas.set_images(self._src_img, None)
+        self._update_preview()
+
+    # ── UI construction ─────────────────────────────
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+
+        # ── Preview canvas ──
+        self._canvas = _ChromaKeyCanvas()
+        self._canvas.colorPicked.connect(self._on_color_picked)
+        self._canvas.safetyMaskChanged.connect(self._on_safety_mask_changed)
+        root.addWidget(self._canvas, 1)
+
+        # ── Toolbar row ──
+        tool_row = QHBoxLayout()
+
+        self._rb_eyedropper = QRadioButton("Eyedropper")
+        self._rb_eyedropper.setChecked(True)
+        self._rb_eyedropper.setToolTip("Click on the image to pick the key color")
+        self._rb_eyedropper.toggled.connect(self._on_mode_changed)
+        tool_row.addWidget(self._rb_eyedropper)
+
+        self._rb_safety = QRadioButton("Safety Brush")
+        self._rb_safety.setToolTip("Paint areas that should NOT be removed")
+        tool_row.addWidget(self._rb_safety)
+
+        tool_row.addSpacing(15)
+
+        tool_row.addWidget(QLabel("Brush Size:"))
+        self._sl_brush_size = QSlider(Qt.Orientation.Horizontal)
+        self._sl_brush_size.setRange(2, 100)
+        self._sl_brush_size.setValue(20)
+        self._sl_brush_size.setFixedWidth(100)
+        self._sl_brush_size.valueChanged.connect(lambda v: setattr(self._canvas, 'brush_size', v))
+        tool_row.addWidget(self._sl_brush_size)
+
+        self._btn_clear_safety = QPushButton("Clear Safety Zone")
+        self._btn_clear_safety.setEnabled(False)
+        self._btn_clear_safety.clicked.connect(self._on_clear_safety)
+        tool_row.addWidget(self._btn_clear_safety)
+
+        tool_row.addStretch()
+
+        # Toggle before / after
+        self._btn_toggle = QPushButton("Show Original")
+        self._btn_toggle.setCheckable(True)
+        self._btn_toggle.setToolTip("Toggle between original and result")
+        self._btn_toggle.toggled.connect(self._on_toggle_preview)
+        tool_row.addWidget(self._btn_toggle)
+
+        root.addLayout(tool_row)
+
+        # ── Parameter row ──
+        param_form = QFormLayout()
+
+        # Color swatch + label
+        color_row = QHBoxLayout()
+        self._lbl_swatch = QLabel()
+        self._lbl_swatch.setFixedSize(24, 24)
+        self._lbl_swatch.setStyleSheet("border: 1px solid #666;")
+        color_row.addWidget(self._lbl_swatch)
+        self._lbl_color = QLabel("R:255  G:255  B:255")
+        color_row.addWidget(self._lbl_color)
+        color_row.addStretch()
+        param_form.addRow("Key Color:", color_row)
+
+        # Tolerance
+        tol_row = QHBoxLayout()
+        self._sl_tolerance = QSlider(Qt.Orientation.Horizontal)
+        self._sl_tolerance.setRange(0, 255)
+        self._sl_tolerance.setValue(self._tolerance)
+        self._sl_tolerance.valueChanged.connect(self._on_param_changed)
+        tol_row.addWidget(self._sl_tolerance)
+        self._lbl_tolerance = QLabel(str(self._tolerance))
+        self._lbl_tolerance.setFixedWidth(30)
+        tol_row.addWidget(self._lbl_tolerance)
+        param_form.addRow("Tolerance:", tol_row)
+
+        # Edge softness
+        soft_row = QHBoxLayout()
+        self._sl_softness = QSlider(Qt.Orientation.Horizontal)
+        self._sl_softness.setRange(0, 50)
+        self._sl_softness.setValue(self._softness)
+        self._sl_softness.valueChanged.connect(self._on_param_changed)
+        soft_row.addWidget(self._sl_softness)
+        self._lbl_softness = QLabel(str(self._softness))
+        self._lbl_softness.setFixedWidth(30)
+        soft_row.addWidget(self._lbl_softness)
+        param_form.addRow("Edge Softness:", soft_row)
+
+        root.addLayout(param_form)
+
+        # ── Buttons ──
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+        # Initial swatch
+        self._refresh_swatch()
+
+    # ── slots ───────────────────────────────────────
+    def _on_mode_changed(self):
+        if self._rb_eyedropper.isChecked():
+            self._canvas.set_mode(_ChromaKeyCanvas.MODE_EYEDROPPER)
+        else:
+            self._canvas.set_mode(_ChromaKeyCanvas.MODE_SAFETY)
+
+    def _on_color_picked(self, r, g, b):
+        self._key_r, self._key_g, self._key_b = r, g, b
+        self._refresh_swatch()
+        self._update_preview()
+
+    def _on_param_changed(self):
+        self._tolerance = self._sl_tolerance.value()
+        self._softness = self._sl_softness.value()
+        self._lbl_tolerance.setText(str(self._tolerance))
+        self._lbl_softness.setText(str(self._softness))
+        self._update_preview()
+
+    def _on_toggle_preview(self, checked):
+        self._btn_toggle.setText("Show Result" if checked else "Show Original")
+        self._canvas.set_show_result(not checked)
+
+    def _on_clear_safety(self):
+        self._canvas.clear_safety_mask()
+        self._btn_clear_safety.setEnabled(False)
+        self._update_preview()
+
+    def _on_safety_mask_changed(self, has_content):
+        self._btn_clear_safety.setEnabled(has_content)
+        # Don't run expensive _update_preview during active painting;
+        # it will be called on mouse release instead.
+        if not self._canvas._painting:
+            self._update_preview()
+
+    def _refresh_swatch(self):
+        self._lbl_swatch.setStyleSheet(
+            f"background-color: rgb({self._key_r},{self._key_g},{self._key_b}); "
+            f"border: 1px solid #666;"
+        )
+        self._lbl_color.setText(f"R:{self._key_r}  G:{self._key_g}  B:{self._key_b}")
+
+    # ── core processing ─────────────────────────────
+    def _update_preview(self):
+        self._result_img = self._apply_chroma_key(
+            self._src_img,
+            (self._key_r, self._key_g, self._key_b),
+            self._tolerance,
+            self._softness,
+            self._canvas.get_safety_mask(),
+        )
+        self._canvas.set_result(self._result_img)
+
+    @staticmethod
+    def _apply_chroma_key(
+        src: Image.Image,
+        key_color: tuple,
+        tolerance: int,
+        softness: int,
+        safety_mask: np.ndarray | None,
+    ) -> Image.Image:
+        """Remove pixels close to *key_color* and return a new RGBA image.
+
+        Parameters
+        ----------
+        src : PIL RGBA image
+        key_color : (r, g, b) 0-255
+        tolerance : int  0-255 – max Euclidean distance in RGB space to be fully removed
+        softness : int  0-50 – additional distance band for soft (partial) transparency
+        safety_mask : H×W uint8 array, 255 = protected pixel (never removed)
+        """
+        arr = np.array(src, dtype=np.float32)  # H×W×4
+        kr, kg, kb = float(key_color[0]), float(key_color[1]), float(key_color[2])
+
+        # Euclidean distance from key color in RGB space
+        diff = np.sqrt(
+            (arr[:, :, 0] - kr) ** 2
+            + (arr[:, :, 1] - kg) ** 2
+            + (arr[:, :, 2] - kb) ** 2
+        )  # H×W
+
+        tol = float(max(tolerance, 0))
+        soft = float(max(softness, 0))
+
+        # Build removal factor: 0.0 = fully remove, 1.0 = fully keep
+        if soft > 0:
+            # Smooth ramp: 0 at dist<=tol, 1 at dist>=tol+soft
+            factor = np.clip((diff - tol) / soft, 0.0, 1.0)
+        else:
+            factor = np.where(diff <= tol, 0.0, 1.0)
+
+        # Apply safety mask: protected pixels → factor = 1.0
+        if safety_mask is not None:
+            safe = safety_mask.astype(np.float32) / 255.0
+            factor = np.maximum(factor, safe)
+
+        # Modulate existing alpha by the factor
+        arr[:, :, 3] *= factor
+        result = arr.clip(0, 255).astype(np.uint8)
+        return Image.fromarray(result, "RGBA")
+
+    # ── public result ───────────────────────────────
+    def get_result(self) -> Image.Image | None:
+        """Return the processed image (available after accept)."""
+        return self._result_img

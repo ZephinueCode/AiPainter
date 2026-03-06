@@ -897,6 +897,9 @@ class LayerPanel(QWidget):
             action_rm_white = menu.addAction("Auto Remove White Background")
             action_rm_white.triggered.connect(lambda: self._remove_white_bg(node))
 
+            action_chroma = menu.addAction("Chroma Key...")
+            action_chroma.triggered.connect(lambda: self._chroma_key(node))
+
             menu.addSeparator()
             action_merge_down = menu.addAction("Merge Down")
             action_merge_down.triggered.connect(lambda: self._merge_down(node))
@@ -937,6 +940,25 @@ class LayerPanel(QWidget):
         self.canvas.update()
         self.refresh()  # update thumbnail
         gl.end_history_action(before_state, "Remove White Background")
+
+    def _chroma_key(self, layer):
+        """Open the Chroma Key dialog for the given layer."""
+        from src.gui.dialogs import ChromaKeyDialog
+
+        gl = self._gl()
+        gl.makeCurrent()
+        src_img = layer.get_image()
+
+        dlg = ChromaKeyDialog(self, src_img)
+        if dlg.exec() == ChromaKeyDialog.DialogCode.Accepted:
+            result = dlg.get_result()
+            if result is not None:
+                before_state = gl.begin_history_action()
+                gl.makeCurrent()
+                layer.load_from_image(result)
+                self.canvas.update()
+                self.refresh()
+                gl.end_history_action(before_state, "Chroma Key")
 
     def _on_opacity_begin(self):
         self._opacity_before_state = self._gl().begin_history_action()

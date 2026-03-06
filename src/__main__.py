@@ -91,7 +91,9 @@ class MainWindow(QMainWindow):
         self.gen_status.move(x, y)
 
     def on_open_generator_dialog(self):
-        dlg = AIGenerateDialog(self)
+        dlg = AIGenerateDialog(self,
+                               canvas_width=self.canvas.doc_width,
+                               canvas_height=self.canvas.doc_height)
         # Connect generation request
         dlg.generationRequested.connect(self.start_generation)
         dlg.exec()

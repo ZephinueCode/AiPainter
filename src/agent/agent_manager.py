@@ -27,6 +27,23 @@ _DEFAULT_MODELS = {
     "superres_illustration_model_path": "models/realesr-animevideov3.pth",
 }
 
+_DEFAULT_PROMPTS = {
+    "auto_sketch_prompt": (
+        "Detect rough or unfinished line art in the current layer and refine it into clean, "
+        "high-quality line art with white background. Preserve original composition and character "
+        "identity, fix broken strokes, improve contour consistency, and avoid adding unrelated objects."
+    ),
+    "auto_color_prompt": (
+        "Analyze the current line art and generate a high-quality colored version while preserving "
+        "the existing structure. Apply harmonious palette, clean rendering, and readable shading."
+    ),
+    "auto_optimize_prompt": (
+        "Auto-optimize this drawing while preserving intent. Improve structure correctness, "
+        "proportions, silhouette readability, composition balance, and overall visual quality."
+    ),
+    "auto_remove_white_bg": True,
+}
+
 _DEFAULT_REPLICATE_API_KEY = ""
 
 class AIAgentManager:
@@ -58,6 +75,11 @@ class AIAgentManager:
         self.chat_system_prompt = _DEFAULT_MODELS["chat_system_prompt"]
         self.superres_general_model_path = _DEFAULT_MODELS["superres_general_model_path"]
         self.superres_illustration_model_path = _DEFAULT_MODELS["superres_illustration_model_path"]
+        # AI preset prompts
+        self.auto_sketch_prompt = _DEFAULT_PROMPTS["auto_sketch_prompt"]
+        self.auto_color_prompt = _DEFAULT_PROMPTS["auto_color_prompt"]
+        self.auto_optimize_prompt = _DEFAULT_PROMPTS["auto_optimize_prompt"]
+        self.auto_remove_white_bg = _DEFAULT_PROMPTS["auto_remove_white_bg"]
         self.load_config()
         self._initialized = True
 
@@ -107,6 +129,17 @@ class AIAgentManager:
                     )
                     self.replicate_api_key = ai_conf.get("replicate_api_key", "")
                     
+                    # AI preset prompts
+                    prompts_conf = data.get("prompts", {})
+                    self.auto_sketch_prompt = prompts_conf.get(
+                        "auto_sketch_prompt", _DEFAULT_PROMPTS["auto_sketch_prompt"])
+                    self.auto_color_prompt = prompts_conf.get(
+                        "auto_color_prompt", _DEFAULT_PROMPTS["auto_color_prompt"])
+                    self.auto_optimize_prompt = prompts_conf.get(
+                        "auto_optimize_prompt", _DEFAULT_PROMPTS["auto_optimize_prompt"])
+                    self.auto_remove_white_bg = prompts_conf.get(
+                        "auto_remove_white_bg", _DEFAULT_PROMPTS["auto_remove_white_bg"])
+
                     self.provider = "dashscope"
                     self._init_client()
             except Exception as e:
@@ -126,12 +159,18 @@ class AIAgentManager:
             self.superres_general_model_path = _DEFAULT_MODELS["superres_general_model_path"]
             self.superres_illustration_model_path = _DEFAULT_MODELS["superres_illustration_model_path"]
             self.replicate_api_key = _DEFAULT_REPLICATE_API_KEY
+            self.auto_sketch_prompt = _DEFAULT_PROMPTS["auto_sketch_prompt"]
+            self.auto_color_prompt = _DEFAULT_PROMPTS["auto_color_prompt"]
+            self.auto_optimize_prompt = _DEFAULT_PROMPTS["auto_optimize_prompt"]
+            self.auto_remove_white_bg = _DEFAULT_PROMPTS["auto_remove_white_bg"]
 
     def save_config(self, base_url, api_key, model, proxy="",
                         edit_model=None, inpaint_model=None, layered_model=None,
                         chat_model=None, chat_system_prompt=None,
                         replicate_api_key=None, superres_general_model_path=None,
-                        superres_illustration_model_path=None):
+                        superres_illustration_model_path=None,
+                        auto_sketch_prompt=None, auto_color_prompt=None,
+                        auto_optimize_prompt=None, auto_remove_white_bg=None):
         self.base_url = self._normalize_dashscope_base_url(base_url)
         self.api_key = api_key
         self.model = model
@@ -154,6 +193,14 @@ class AIAgentManager:
             self.superres_general_model_path = superres_general_model_path
         if superres_illustration_model_path is not None:
             self.superres_illustration_model_path = superres_illustration_model_path
+        if auto_sketch_prompt is not None:
+            self.auto_sketch_prompt = auto_sketch_prompt
+        if auto_color_prompt is not None:
+            self.auto_color_prompt = auto_color_prompt
+        if auto_optimize_prompt is not None:
+            self.auto_optimize_prompt = auto_optimize_prompt
+        if auto_remove_white_bg is not None:
+            self.auto_remove_white_bg = auto_remove_white_bg
         
         self.provider = "dashscope"
         
@@ -179,6 +226,13 @@ class AIAgentManager:
             "replicate_api_key": self.replicate_api_key,
             "superres_general_model_path": self.superres_general_model_path,
             "superres_illustration_model_path": self.superres_illustration_model_path,
+        }
+        
+        data["prompts"] = {
+            "auto_sketch_prompt": self.auto_sketch_prompt,
+            "auto_color_prompt": self.auto_color_prompt,
+            "auto_optimize_prompt": self.auto_optimize_prompt,
+            "auto_remove_white_bg": self.auto_remove_white_bg,
         }
         
         try:
