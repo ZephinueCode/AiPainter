@@ -736,11 +736,19 @@ class SelectionTool(Tool):
         menu.addSeparator()
         has_layer = self.canvas.active_layer is not None
         if self.has_selection():
-            act_wanx = menu.addAction("Edit Selected Area", lambda: self._trigger_wanx_inpaint())
+            act_wanx = menu.addAction("(AI) Edit Selected Area", lambda: self._trigger_wanx_inpaint())
             act_wanx.setEnabled(has_layer)
         else:
-            act_qwen = menu.addAction("Edit Layer", lambda: self._trigger_qwen_edit())
+            act_sep = menu.addAction("(AI) Multi-Layer Gen (Experimental)", lambda: self.canvas.test_trigger_ai())
+            act_sep.setEnabled(has_layer)
+            act_qwen = menu.addAction("(AI) Edit Layer", lambda: self._trigger_qwen_edit())
             act_qwen.setEnabled(has_layer)
+            menu.addSeparator()
+            menu.addAction("HSL Adjustment", lambda: self.canvas.open_adjustment("HSL"))
+            menu.addAction("Contrast", lambda: self.canvas.open_adjustment("Contrast"))
+            menu.addAction("Exposure", lambda: self.canvas.open_adjustment("Exposure"))
+            menu.addAction("Gaussian Blur", lambda: self.canvas.open_adjustment("Blur"))
+            menu.addAction("Gradient Map...", self.canvas.open_gradient_map)
         menu.exec(global_pos)
 
     def _trigger_wanx_inpaint(self):

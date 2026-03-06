@@ -488,6 +488,7 @@ class GLCanvas(QOpenGLWidget):
         glTranslatef(self.offset.x(), self.offset.y(), 0)
         glScalef(self.zoom, self.zoom, 1)
 
+        glDisable(GL_TEXTURE_2D)
         glColor3f(0.5, 0.5, 0.5)
         glRectf(0, 0, self.doc_width, self.doc_height)
         
